@@ -1,0 +1,17 @@
+# 自动化核心依赖（用来控制史莱姆牧场/语音）。按需安装：
+#   - vision / 键鼠：pyautogui opencv-python Pillow pytesseract
+#   - 窗口：pygetwindow pywinauto
+#   - 语音：faster-whisper sounddevice
+#   - 热键：pynput
+# SIM 模式仅需标准库。
+pyautogui>=0.9.54
+opencv-python>=4.8
+Pillow>=10.0
+pytesseract>=0.3.10
+pynput>=1.7.6
+pygetwindow>=0.0.9
+sounddevice>=0.4.6
+faster-whisper>=1.0.0
+numpy>=1.24
+# Tesseract OCR 引擎需单独安装（Windows: https://github.com/UB-Mannheim/tesseract），
+# 并把其安装目录加入 PATH。

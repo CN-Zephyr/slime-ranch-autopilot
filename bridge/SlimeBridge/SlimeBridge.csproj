@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net462</TargetFramework>
+    <LangVersion>7.3</LangVersion>
+    <RootNamespace>SlimeBridge</RootNamespace>
+    <AssemblyName>SlimeBridge</AssemblyName>
+    <Nullable>disable</Nullable>
+    <!-- UMF 官方参考 mod(SRCheatMenu) 用 net462 + 引用游戏 Managed 目录。 -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 引用游戏真实 dll，路径按本机实际安装位置 -->
+    <Reference Include="Assembly-CSharp">
+      <HintPath>E:\SteamLibrary\steamapps\common\Slime Rancher\SlimeRancher_Data\Managed\Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>E:\SteamLibrary\steamapps\common\Slime Rancher\SlimeRancher_Data\Managed\UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>E:\SteamLibrary\steamapps\common\Slime Rancher\SlimeRancher_Data\Managed\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.TextRenderingModule">
+      <HintPath>E:\SteamLibrary\steamapps\common\Slime Rancher\SlimeRancher_Data\Managed\UnityEngine.TextRenderingModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.PhysicsModule">
+      <HintPath>E:\SteamLibrary\steamapps\common\Slime Rancher\SlimeRancher_Data\Managed\UnityEngine.PhysicsModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.IMGUIModule">
+      <HintPath>E:\SteamLibrary\steamapps\common\Slime Rancher\SlimeRancher_Data\Managed\UnityEngine.IMGUIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="uModFramework">
+      <HintPath>E:\SteamLibrary\steamapps\common\Slime Rancher\SlimeRancher_Data\Managed\uModFramework.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityCoreMod">
+      <HintPath>E:\SteamLibrary\steamapps\common\Slime Rancher\SlimeRancher_Data\Managed\UnityCoreMod.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="System.Net">
+      <HintPath>C:\Windows\Microsoft.NET\Framework64\v4.0.30319\System.Net.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="ModInfo.txt">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>

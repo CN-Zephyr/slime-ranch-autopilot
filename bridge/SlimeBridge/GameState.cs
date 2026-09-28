@@ -1,0 +1,1378 @@
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
+using System.Reflection;
+using UnityEngine;
+using MonomiPark.SlimeRancher.DataModel;
+
+namespace SlimeBridge
+{
+    // ---- 供 HttpServer 使用的数据模型 ----
+    public class GameStatus
+    {
+        public bool gameLoaded;
+        public int money = -1;           // <0 表示未知
+        public bool moneyEstimated;      // true 表示 money 来自台账估算（未进存档时）
+        public int corralLevel, corralCount;
+        public int coopLevel, coopCount;
+        public int gardenLevel, gardenCount;
+        public string plorts = "";
+        public string area = "";
+        public string note = "";
+    }
+
+    public class ActionResult
+    {
+        public bool ok;
+        public string strategy = "";
+        public int gains;
+        public int count;            // 本次动作涉及的数量（如收集/售卖的结晶数）
+        public string caught;
+        public bool newArea;
+        public string area = "";
+        public string note = "";
+        // ---- 目标感知（target 动作）：供 core 真实转向/走向 ----
+        public string targetKind = "";   // "slime" | "plort" | ""(无目标)
+        public float dist;               // 玩家到目标的水平距离(米)
+        public float yawDelta;           // 玩家 forward 到目标的带符号水平角(度)，负=目标在右侧
+        public float px, py;             // 玩家世界坐标(供 core 漫游/校验)
+        public float tx, tz;             // 目标世界坐标
+        public float cx, cz, cyaw;       // 结晶市场中心坐标 + 朝向中心偏角（scan_market 用：投掷目标）
+    }
+
+    public interface IGameFacade
+    {
+        GameStatus ReadStatus();
+        ActionResult ExecuteAction(string action, string kind);
+    }
+
+    // ---- 日志辅助：优先 UnityEngine，其次 UMF GUI 控制台，全失败静默 ----
+    public static class UMFLog
+    {
+        public static void Log(string msg)
+        {
+            try
+            {
+                Debug.Log(msg);
+            }
+            catch (Exception) { }
+            try
+            {
+                Type gui = Type.GetType("UModFramework.API.UMFGUI, uModFramework");
+                if (gui == null) gui = Type.GetType("UModFramework.API.UMFGUI, UModFramework.API");
+                if (gui != null)
+                {
+                    MethodInfo m = gui.GetMethod("AddConsoleText", new[] { typeof(string) });
+                    if (m != null) m.Invoke(null, new object[] { msg });
+                }
+            }
+            catch (Exception) { }
+        }
+    }
+
+    // ---- 游戏状态读取 + 动作执行（native 策略：全部真实游戏 API，绝不假报）----
+    // 真实数据来源（直接强类型访问游戏程序集）：
+    //   资金   -> SceneContext.Instance.PlayerState / GameModel.GetPlayerModel()
+    //   结晶   -> SceneContext.Instance.GadgetDirector 精炼器 (AddToRefinery / GetRefineryCount)
+    //   区域   -> SceneContext.Instance.PlayerZoneTracker.GetCurrentZone()
+    //   建造   -> LandPlot + EmptyPlotUI.BuyPlot(PlotPurchaseItem) 真实购买
+    //   升级   -> LandPlot.AddUpgrade(Upgrade)
+    public class GameFacade : IGameFacade
+    {
+        private readonly object _lock = new object();
+        private readonly ConcurrentQueue<Action> _mainThreadQueue = new ConcurrentQueue<Action>();
+        private int _mainDepth;   // >0 表示当前正运行在 Unity 主线程（内层 Unity 调用直接执行）
+
+        public string strategy = "native";
+
+        // 真实游戏对象缓存（首次访问时初始化，全部来自 SRSingleton<SceneContext>.Instance）
+        private SceneContext _scene;
+        private GameModel _gameModel;
+        private PlayerModel _playerModel;
+        private PlayerState _playerState;
+        private GadgetDirector _gadgetDirector;
+        private PlayerZoneTracker _zoneTracker;
+        private GameObject _player;
+
+        // 台账兜底（未进存档 / 游戏未启动时展示用，绝不混入真实动作结果）
+        public int money = 0;
+        public int plortCount = 0;
+        public int plortGain = 0;
+        public string lastArea = "";
+        public string lastCaught = "";
+        public int corralLevel, corralCount;
+        public int coopLevel, coopCount;
+        public int gardenLevel, gardenCount;
+
+        private ZoneDirector.Zone _lastZone = ZoneDirector.Zone.RANCH;
+        private bool _hasZone = false;
+
+        // 集市民价（历史基础价，用于"卖结晶"换算真实资金）
+        private static readonly Dictionary<Identifiable.Id, int> PLORT_PRICE = new Dictionary<Identifiable.Id, int>
+        {
+            { Identifiable.Id.PINK_PLORT, 10 },
+            { Identifiable.Id.ROCK_PLORT, 15 },
+            { Identifiable.Id.TABBY_PLORT, 15 },
+            { Identifiable.Id.PHOSPHOR_PLORT, 15 },
+            { Identifiable.Id.RAD_PLORT, 25 },
+            { Identifiable.Id.BOOM_PLORT, 25 },
+            { Identifiable.Id.CRYSTAL_PLORT, 25 },
+            { Identifiable.Id.HONEY_PLORT, 30 },
+            { Identifiable.Id.HUNTER_PLORT, 35 },
+            { Identifiable.Id.PUDDLE_PLORT, 35 },
+            { Identifiable.Id.QUANTUM_PLORT, 40 },
+            { Identifiable.Id.DERVISH_PLORT, 40 },
+            { Identifiable.Id.MOSAIC_PLORT, 40 },
+            { Identifiable.Id.TANGLE_PLORT, 40 },
+            { Identifiable.Id.FIRE_PLORT, 50 },
+            { Identifiable.Id.SABER_PLORT, 50 },
+        };
+        private static readonly Identifiable.Id[] PLORT_IDS;
+
+        static GameFacade()
+        {
+            PLORT_IDS = PLORT_PRICE.Keys.ToArray();
+        }
+
+        // 史莱姆类 Identifiable.Id（用于探索时识别附近真实存在的史莱姆）
+        private static readonly HashSet<Identifiable.Id> SLIME_IDS = new HashSet<Identifiable.Id>
+        {
+            Identifiable.Id.PINK_SLIME, Identifiable.Id.ROCK_SLIME, Identifiable.Id.TABBY_SLIME,
+            Identifiable.Id.PHOSPHOR_SLIME, Identifiable.Id.RAD_SLIME, Identifiable.Id.BOOM_SLIME,
+            Identifiable.Id.CRYSTAL_SLIME, Identifiable.Id.HONEY_SLIME, Identifiable.Id.HUNTER_SLIME,
+            Identifiable.Id.PUDDLE_SLIME, Identifiable.Id.QUANTUM_SLIME, Identifiable.Id.DERVISH_SLIME,
+            Identifiable.Id.MOSAIC_SLIME, Identifiable.Id.TANGLE_SLIME, Identifiable.Id.FIRE_SLIME,
+            Identifiable.Id.SABER_SLIME,
+        };
+
+        public GameFacade(string strategy)
+        {
+            this.strategy = string.IsNullOrEmpty(strategy) ? "native" : strategy;
+        }
+
+        // 由 Plugin.Update() 每帧在 Unity 主线程调用：执行挂起的动作。
+        public void FlushMainThreadQueue()
+        {
+            Action a;
+            while (_mainThreadQueue.TryDequeue(out a))
+            {
+                _mainDepth++;
+                try { a(); }
+                catch (Exception e) { UMFLog.Log("[SlimeBridge] main-thread error: " + e); }
+                finally { _mainDepth--; }
+            }
+        }
+
+        private void PostMainThread(Action a) { _mainThreadQueue.Enqueue(a); }
+
+        // 在 Unity 主线程执行无返回值操作，HTTP 线程等待完成（最多 5 秒）。
+        // 若已运行在主线程（_mainDepth > 0）则直接执行，避免二次排队。
+        private void RunOnMain(Action a)
+        {
+            if (_mainDepth > 0) { a(); return; }
+            var box = new Box<object>();
+            PostMainThread(() =>
+            {
+                try { a(); }
+                catch (Exception e) { UMFLog.Log("[SlimeBridge] action error: " + e.Message); }
+                box.Done = true;
+            });
+            int waited = 0;
+            while (!box.Done && waited < 5000)
+            {
+                System.Threading.Thread.Sleep(5);
+                waited += 5;
+            }
+        }
+
+        // 在 Unity 主线程执行带返回值的操作，HTTP 线程等待结果（最多 5 秒）。
+        private sealed class Box<T> { public T Value; public bool Done; }
+        private T RunOnMain<T>(Func<T> f)
+        {
+            if (_mainDepth > 0) return f();
+            var box = new Box<T>();
+            PostMainThread(() =>
+            {
+                try { box.Value = f(); }
+                catch (Exception e) { UMFLog.Log("[SlimeBridge] action error: " + e.Message); }
+                box.Done = true;
+            });
+            int waited = 0;
+            while (!box.Done && waited < 5000)
+            {
+                System.Threading.Thread.Sleep(5);
+                waited += 5;
+            }
+            return box.Value;
+        }
+
+        // ---- 场景/缓存 ----
+        private void EnsureScene()
+        {
+            if (_scene != null) return;
+            _scene = SRSingleton<SceneContext>.Instance;
+            if (_scene == null) return;
+            try
+            {
+                _gameModel = _scene.GameModel;
+                _playerState = _scene.PlayerState;
+                _gadgetDirector = _scene.GadgetDirector;
+                _zoneTracker = _scene.PlayerZoneTracker;
+                _player = _scene.Player;
+                if (_gameModel != null) _playerModel = _gameModel.GetPlayerModel();
+            }
+            catch (Exception e)
+            {
+                UMFLog.Log("[SlimeBridge] EnsureScene partial error: " + e.Message);
+            }
+        }
+
+        public bool GameLoaded()
+        {
+            EnsureScene();
+            // 必须玩家对象已生成才算真正进入存档；主菜单上 PlayerState 也存在但 Player 为 null。
+            return _scene != null && _playerState != null && _player != null;
+        }
+
+        // ---- 资金（真实）----
+        public int ReadMoneyReal()
+        {
+            try
+            {
+                EnsureScene();
+                if (_playerModel != null) return _playerModel.currency;
+                if (_playerState != null) return _playerState.GetDisplayedCurrency();
+            }
+            catch (Exception) { }
+            return -1;
+        }
+
+        public void SetMoneyReal(int num)
+        {
+            try
+            {
+                EnsureScene();
+                if (_playerModel != null) _playerModel.SetCurrency(num);
+            }
+            catch (Exception) { }
+        }
+
+        public void AddCurrencyReal(int amt)
+        {
+            try
+            {
+                EnsureScene();
+                if (_playerState != null) _playerState.AddCurrency(amt, PlayerState.CoinsType.NORM);
+                else if (_playerModel != null) _playerModel.SetCurrency(Math.Max(0, _playerModel.currency + amt));
+            }
+            catch (Exception) { }
+        }
+
+        // ---- 区域（真实）----
+        private ZoneDirector.Zone CurrentZone()
+        {
+            try
+            {
+                EnsureScene();
+                return _zoneTracker != null ? _zoneTracker.GetCurrentZone() : ZoneDirector.Zone.RANCH;
+            }
+            catch (Exception) { return ZoneDirector.Zone.RANCH; }
+        }
+
+        private static string ZoneToName(ZoneDirector.Zone z)
+        {
+            switch (z)
+            {
+                case ZoneDirector.Zone.QUARRY: return "干燥采石场";
+                case ZoneDirector.Zone.MOSS: return "苔藓牧场";
+                case ZoneDirector.Zone.DESERT: return "玻璃沙漠";
+                case ZoneDirector.Zone.RUINS: return "古代遗迹";
+                case ZoneDirector.Zone.WILDS: return "荒野";
+                case ZoneDirector.Zone.OGDEN_RANCH: return "奥格登牧场";
+                case ZoneDirector.Zone.MOCHI_RANCH: return "望月牧场";
+                case ZoneDirector.Zone.VIKTOR_LAB: return "维克托实验室";
+                case ZoneDirector.Zone.SLIMULATIONS: return "史莱姆模拟场";
+                case ZoneDirector.Zone.REEF: return "礁石";
+                case ZoneDirector.Zone.SEA: return "海洋";
+                case ZoneDirector.Zone.VALLEY: return "山谷";
+                case ZoneDirector.Zone.RANCH: return "牧场";
+                default: return "未知区域";
+            }
+        }
+
+        private Vector3 PlayerPos()
+        {
+            try
+            {
+                EnsureScene();
+                return _player != null ? _player.transform.position : Vector3.zero;
+            }
+            catch (Exception) { return Vector3.zero; }
+        }
+
+        // ---- 结晶（真实精炼器）----
+        private int RefineryCount(Identifiable.Id id)
+        {
+            try
+            {
+                EnsureScene();
+                return _gadgetDirector != null ? _gadgetDirector.GetRefineryCount(id) : 0;
+            }
+            catch (Exception) { return 0; }
+        }
+
+        private int RefineryTotal()
+        {
+            int total = 0;
+            foreach (var id in PLORT_IDS) total += RefineryCount(id);
+            return total;
+        }
+
+        // ---- 地块（真实建造）----
+        // LandPlot.model 是私有字段，用反射读取（模型来自游戏真实数据）。
+        private static LandPlotModel PlotModelOf(LandPlot plot)
+        {
+            try
+            {
+                FieldInfo f = typeof(LandPlot).GetField("model",
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                return f != null ? f.GetValue(plot) as LandPlotModel : null;
+            }
+            catch (Exception) { return null; }
+        }
+
+        // 找全场景最近的目标地块（不限 30m：建造/升级前会把玩家自动传送过去）
+        private LandPlot FindPlotNearPlayer(bool empty)
+        {
+            try
+            {
+                EnsureScene();
+                if (_player == null) return null;
+                var plots = UnityEngine.Object.FindObjectsOfType<LandPlot>();
+                Vector3 p = _player.transform.position;
+                LandPlot best = null;
+                float bestD = float.MaxValue;
+                foreach (var lp in plots)
+                {
+                    if (lp == null) continue;
+                    LandPlotModel m = PlotModelOf(lp);
+                    if (m == null) continue;
+                    bool isEmpty = (m.typeId == LandPlot.Id.NONE || m.typeId == LandPlot.Id.EMPTY);
+                    if (empty != isEmpty) continue;
+                    float d = Vector3.Distance(p, lp.transform.position);
+                    if (d < bestD) { bestD = d; best = lp; }
+                }
+                return best;
+            }
+            catch (Exception) { return null; }
+        }
+
+        private LandPlot FindPlotOfKind(string kind)
+        {
+            try
+            {
+                EnsureScene();
+                if (_player == null) return null;
+                LandPlot.Id want = KindToPlotId(kind);
+                var plots = UnityEngine.Object.FindObjectsOfType<LandPlot>();
+                Vector3 p = _player.transform.position;
+                LandPlot best = null;
+                float bestD = float.MaxValue;
+                foreach (var lp in plots)
+                {
+                    if (lp == null) continue;
+                    LandPlotModel m = PlotModelOf(lp);
+                    if (m == null) continue;
+                    if (m.typeId != want) continue;
+                    float d = Vector3.Distance(p, lp.transform.position);
+                    if (d < bestD) { bestD = d; best = lp; }
+                }
+                return best;
+            }
+            catch (Exception) { return null; }
+        }
+
+        private static LandPlot.Id KindToPlotId(string kind)
+        {
+            if (kind == "coop") return LandPlot.Id.COOP;
+            if (kind == "garden") return LandPlot.Id.GARDEN;
+            return LandPlot.Id.CORRAL;
+        }
+
+        // 从地块的 EmptyPlotUI 上取该建筑类型的购买项（EmptyPlotUI.corral/coop/garden
+        // 是实例字段，且字段非公开，用反射读取）。
+        private LandPlotUI.PlotPurchaseItem GetPurchaseItem(EmptyPlotUI ui, string kind)
+        {
+            try
+            {
+                string fn = kind == "coop" ? "coop" : (kind == "garden" ? "garden" : "corral");
+                FieldInfo f = typeof(EmptyPlotUI).GetField(fn,
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (f == null) return null;
+                return f.GetValue(ui) as LandPlotUI.PlotPurchaseItem;
+            }
+            catch (Exception) { return null; }
+        }
+
+        private static int PurchaseCost(LandPlotUI.PlotPurchaseItem item)
+        {
+            try
+            {
+                FieldInfo f = typeof(LandPlotUI.PlotPurchaseItem).GetField("cost",
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                return f != null ? Convert.ToInt32(f.GetValue(item)) : 0;
+            }
+            catch (Exception) { return 0; }
+        }
+
+        // BuyPlot 声明在基类 LandPlotUI 上（protected），用反射调用（真实购买：扣钱 + Replace 建筑）。
+        private static bool TryBuyPlot(EmptyPlotUI ui, object item)
+        {
+            try
+            {
+                MethodInfo m = typeof(LandPlotUI).GetMethod("BuyPlot",
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (m == null) { UMFLog.Log("[SlimeBridge] BuyPlot method not found"); return false; }
+                return Convert.ToBoolean(m.Invoke(ui, new object[] { item }));
+            }
+            catch (Exception e)
+            {
+                UMFLog.Log("[SlimeBridge] BuyPlot reflect error: " + e.Message);
+                return false;
+            }
+        }
+
+        // 按字段名沿类型继承链向上找字段（activator/playerState 声明在基类 LandPlotUI）。
+        private static FieldInfo FindField(Type t, string name)
+        {
+            Type cur = t;
+            while (cur != null)
+            {
+                FieldInfo f = cur.GetField(name,
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (f != null) return f;
+                cur = cur.BaseType;
+            }
+            return null;
+        }
+
+        // 取地块上的 EmptyPlotUI：优先子物体（含未激活），再全局查找，
+        // 都没有则从 GameContext.UITemplates.purchaseUIPrefab 实例化一个购买面板
+        // （该面板是玩家靠近空地块时才动态生成的，不靠近时场景里不存在）。
+        private EmptyPlotUI FindEmptyUI(LandPlot plot)
+        {
+            try
+            {
+                var children = plot.GetComponentsInChildren<EmptyPlotUI>(true);
+                if (children != null && children.Length > 0) return children[0];
+            }
+            catch (Exception) { }
+            try
+            {
+                var all = UnityEngine.Object.FindObjectsOfType<EmptyPlotUI>();
+                if (all != null && all.Length > 0) return all[0];
+            }
+            catch (Exception) { }
+            try
+            {
+                var gc = GameContext.Instance;
+                if (gc != null && gc.UITemplates != null)
+                {
+                    GameObject prefab = gc.UITemplates.purchaseUIPrefab;
+                    if (prefab != null)
+                    {
+                        GameObject inst = RunOnMain(() =>
+                        {
+                            var go = UnityEngine.Object.Instantiate(prefab);
+                            return go;
+                        });
+                        if (inst != null)
+                        {
+                            var eui = inst.GetComponentInChildren<EmptyPlotUI>(true);
+                            if (eui == null) eui = inst.GetComponent<EmptyPlotUI>();
+                            if (eui != null) _spawnedPurchaseUI = inst;  // 用完销毁
+                            else UnityEngine.Object.Destroy(inst);
+                            return eui;
+                        }
+                    }
+                }
+            }
+            catch (Exception e) { UMFLog.Log("[SlimeBridge] spawn purchaseUI err: " + e.Message); }
+            return null;
+        }
+
+        // 自建购买面板实例（用完销毁，避免污染场景）
+        private GameObject _spawnedPurchaseUI;
+
+        // ---- 动作执行（整体投放到 Unity 主线程，杜绝跨线程调游戏 API）----
+        public ActionResult ExecuteAction(string action, string kind)
+        {
+            lock (_lock)
+            {
+                var ar = new ActionResult { strategy = strategy };
+                RunOnMain(() =>
+                {
+                    try
+                    {
+                        switch (action)
+                        {
+                            case "money_add":
+                                int amt = 0;
+                                int.TryParse(kind, out amt);
+                                if (amt > 0)
+                                {
+                                    AddCurrencyReal(amt);
+                                    ar.ok = true;
+                                    ar.note = "已增加资金 $" + amt + "（真实，当前 $" + ReadMoneyReal() + "）";
+                                }
+                                else { ar.ok = false; ar.note = "参数必须是正整数"; }
+                                break;
+                            case "build": BuildReal(kind, ar); break;
+                            case "upgrade": UpgradeReal(kind, ar); break;
+                            case "harvest": HarvestReal(ar); break;
+                            case "sell": SellReal(ar); break;
+                            case "explore": ExploreReal(ar); break;
+                            case "go_home": GoHomeReal(ar); break;
+                            case "target": ScanTargetReal(ar); break;
+                            case "scan_corral": ScanCorralReal(ar); break;
+                            case "scan_market": ScanMarketReal(ar); break;
+                            case "debug_market": DebugMarketReal(ar); break;
+                            case "probe": ProbeNearReal(ar, kind); break;
+                            case "continue": ContinueSaveReal(ar); break;
+                            case "debug_scene": DebugSceneReal(ar); break;
+                            case "debug_font":
+                                ar.ok = true;
+                                ar.note = SlimeBridgeBehaviour.FontDiagnostics();
+                                break;
+                            case "set_overlay":
+                                OverlayText = kind ?? "";
+                                ar.ok = true;
+                                ar.note = "overlay 已更新";
+                                break;
+                            default: ar.ok = false; ar.note = "未知动作 " + action; break;
+                        }
+                    }
+                    catch (Exception e)
+                    {
+                        ar.ok = false; ar.note = "执行异常: " + e.Message;
+                    }
+                });
+                return ar;
+            }
+        }
+
+        // ---- 屏幕叠加层文字（core 通过 set_overlay 推送；SlimeBridgeBehaviour.OnGUI 每帧渲染）----
+        public static volatile string OverlayText = "NEKO 自动游玩：等待连接…";
+
+        // ---- 收割（真实：向精炼器添加结晶）----
+        private void HarvestReal(ActionResult ar)
+        {
+            EnsureScene();
+            if (_gadgetDirector == null)
+            {
+                ar.ok = false; ar.note = "精炼器不可用（未进入存档）";
+                return;
+            }
+            var rng = new System.Random();
+            Identifiable.Id id = PLORT_IDS[rng.Next(PLORT_IDS.Length)];
+            int added = 0;
+            try { added = RunOnMain(() => _gadgetDirector.AddToRefinery(id, 5)); }
+            catch (Exception e) { added = 0; UMFLog.Log("[SlimeBridge] harvest err: " + e.Message); }
+            if (added > 0)
+            {
+                ar.ok = true;
+                ar.count = added;
+                ar.note = "已收集 " + id + " x" + added + "，精炼器现共有 " + RefineryTotal() + " 个结晶（真实）";
+            }
+            else
+            {
+                ar.ok = false; ar.note = "收集失败：精炼器无法添加（可能空间不足或未解锁）";
+            }
+        }
+
+        // ---- 售卖（真实：精炼器结晶 -> 真实资金）----
+        private void SellReal(ActionResult ar)
+        {
+            EnsureScene();
+            int totalGain = 0, soldCount = 0;
+            var detail = new List<string>();
+            foreach (var id in PLORT_IDS)
+            {
+                int count = RefineryCount(id);
+                if (count <= 0) continue;
+                int gain = count * PLORT_PRICE[id];
+                if (TrySpendRefinery(id, count))
+                {
+                    totalGain += gain;
+                    soldCount += count;
+                    detail.Add(id + " x" + count);
+                }
+            }
+            if (soldCount > 0)
+            {
+                AddCurrencyReal(totalGain);
+                ar.ok = true;
+                ar.gains = totalGain;
+                ar.count = soldCount;
+                ar.note = "已售出 " + string.Join(", ", detail.ToArray()) + "，收入 $" + totalGain
+                          + "，当前资金 $" + ReadMoneyReal() + "（真实）";
+            }
+            else
+            {
+                ar.ok = false; ar.note = "精炼器中没有可售卖的结晶（当前 " + RefineryTotal() + " 个非结晶资源）";
+            }
+        }
+
+        private bool TrySpendRefinery(Identifiable.Id id, int amount)
+        {
+            try
+            {
+                EnsureScene();
+                if (_gadgetDirector == null) return false;
+                return RunOnMain(() =>
+                {
+                    var cost = new GadgetDefinition.CraftCost();
+                    cost.id = id;
+                    cost.amount = amount;
+                    return _gadgetDirector.TryToSpendFromRefinery(new GadgetDefinition.CraftCost[] { cost });
+                });
+            }
+            catch (Exception) { return false; }
+        }
+
+        // ---- 探索（真实：移动到真实史莱姆附近/区域随机位置 + 如实汇报发现）----
+        // 之前的实现只会沿 forward 直线移动（看起来像"一直往前走"），且发现史莱姆就谎报"抓捕"。
+        // 现在：优先传送到附近真实史莱姆旁观察；没有则朝随机水平方向移动，避免直线重复。
+        private void ExploreReal(ActionResult ar)
+        {
+            EnsureScene();
+            if (_player == null)
+            {
+                ar.ok = false; ar.note = "未进入存档";
+                return;
+            }
+            ZoneDirector.Zone z = CurrentZone();
+            string zoneName = ZoneToName(z);
+            if (!_hasZone || z != _lastZone) ar.newArea = true;
+            _lastZone = z;
+            _hasZone = true;
+            lastArea = zoneName;
+
+            string nearby = FindNearbySlime(25f);
+            if (nearby != "") lastCaught = nearby;
+
+            RunOnMain(() =>
+            {
+                Vector3 p = _player.transform.position;
+                if (nearby != "")
+                {
+                    // 传送到最近史莱姆旁观察（真实位置）
+                    var all = UnityEngine.Object.FindObjectsOfType<Identifiable>();
+                    float bestD = 25f; Vector3 target = p;
+                    foreach (var idf in all)
+                    {
+                        if (idf == null || idf.gameObject == null) continue;
+                        if (!SLIME_IDS.Contains(idf.id)) continue;
+                        float d = Vector3.Distance(p, idf.transform.position);
+                        if (d < bestD) { bestD = d; target = idf.transform.position; }
+                    }
+                    _player.transform.position = target + Vector3.up * 0.5f;
+                }
+                else
+                {
+                    // 随机水平方向前进（不再只沿 forward），避免"只会往前走"
+                    Vector3 dir = new Vector3(UnityEngine.Random.Range(-1f, 1f), 0f,
+                                              UnityEngine.Random.Range(-1f, 1f)).normalized;
+                    _player.transform.position += dir * 8f + Vector3.up * 0.1f;
+                }
+            });
+
+            ar.ok = true;
+            ar.area = zoneName;
+            ar.caught = nearby;   // 语义 = 发现（如实，不谎称抓捕）
+            ar.note = "已探索 " + zoneName + "，位置 " + PlayerPos().ToString("F0")
+                      + (nearby != "" ? "，附近发现 " + nearby : "");
+        }
+
+        private string FindNearbySlime(float radius)
+        {
+            try
+            {
+                EnsureScene();
+                if (_player == null) return "";
+                var all = UnityEngine.Object.FindObjectsOfType<Identifiable>();
+                Vector3 p = _player.transform.position;
+                string best = "";
+                float bestD = radius;
+                foreach (var idf in all)
+                {
+                    if (idf == null || idf.gameObject == null) continue;
+                    if (!SLIME_IDS.Contains(idf.id)) continue;
+                    float d = Vector3.Distance(p, idf.transform.position);
+                    if (d < bestD) { bestD = d; best = idf.id.ToString(); }
+                }
+                return best;
+            }
+            catch (Exception) { return ""; }
+        }
+
+        // ---- 回家（真实：传送到牧场）----
+        private void GoHomeReal(ActionResult ar)
+        {
+            EnsureScene();
+            if (_player == null)
+            {
+                ar.ok = false; ar.note = "未进入存档";
+                return;
+            }
+            // 优先找牧场房子对象；找不到则用牧场坐标兜底（牧场位于地图原点附近）。
+            Transform home = null;
+            try
+            {
+                var houses = UnityEngine.Object.FindObjectsOfType<Transform>()
+                    .Where(t => t != null && t.name != null && t.name.IndexOf("RanchHouse", StringComparison.OrdinalIgnoreCase) >= 0)
+                    .ToArray();
+                if (houses.Length > 0) home = houses[0];
+            }
+            catch (Exception) { }
+            Vector3 target = home != null
+                ? home.position + home.forward * 6f
+                : new Vector3(0f, 40f, 0f);
+            RunOnMain(() => { _player.transform.position = target; });
+            ar.ok = true;
+            ar.area = "牧场";
+            ar.note = "已传送回牧场（真实，新位置 " + target + "）";
+        }
+
+        // ---- 自动读档（真实：主菜单调用 ContinueGame，进入最近存档）----
+        private void ContinueSaveReal(ActionResult ar)
+        {
+            try
+            {
+                var ui = UnityEngine.Object.FindObjectOfType<MainMenuUI>();
+                if (ui == null)
+                {
+                    bool loaded = GameLoaded();
+                    ar.ok = loaded;
+                    ar.note = loaded ? "已在存档中，无需读档" : "找不到主菜单，无法自动读档";
+                    return;
+                }
+                RunOnMain(() => ui.ContinueGame());
+                ar.ok = true;
+                ar.note = "已请求读取最近存档，正在进入…";
+            }
+            catch (Exception e)
+            {
+                ar.ok = false; ar.note = "自动读档失败: " + e.Message;
+            }
+        }
+
+        // ---- 目标感知（真实：纯只读，供 core 用键鼠真实转向/走向抓捕）----
+        // 在 SEARCH_RADIUS 米内找最近目标：优先"很近的落地结晶"(<15m，静态、直接吸了卖钱)，
+        // 其次最近史莱姆（要抓来养），再其次较远结晶。半径放大到 220m，保证在牧场也能
+        // 感知到隔壁区域（如干燥礁石）的野史莱姆，从而让 core 有方向可走（不再"无目标只能漫游"）。
+        // 计算并返回：目标类型、水平距离、以及玩家 forward 到目标的带符号水平角 yawDelta
+        // （约定：Vector3.SignedAngle(forward, toTarget, up)，负=目标在玩家右侧）。
+        // 无副作用：不瞬移、不改状态，只为 core 提供"该往哪转、走多远"的精准依据。
+        private void ScanTargetReal(ActionResult ar)
+        {
+            EnsureScene();
+            if (_player == null) { ar.ok = false; ar.note = "未进入存档"; return; }
+            const float SEARCH_RADIUS = 220f;
+            Vector3 p = _player.transform.position;
+            Vector3 forward = _player.transform.forward;
+            ar.px = p.x; ar.py = p.z;
+
+            float bestDS = SEARCH_RADIUS;       // 最近野生史莱姆
+            string bestKindS = "";
+            Vector3 bestTS = Vector3.zero;
+            float bestDP = SEARCH_RADIUS;       // 最近落地结晶
+            string bestKindP = "";
+            Vector3 bestTP = Vector3.zero;
+            // 家养史莱姆排除：先收集所有围栏(CORRAL)平台中心。围栏里的史莱姆是"养的"，
+            // 不该被当成抓捕目标（否则 core 会反复吸家养史莱姆、投放又失败，死循环）。
+            List<Vector3> corralCenters = new List<Vector3>();
+            try
+            {
+                var plots = UnityEngine.Object.FindObjectsOfType<LandPlot>();
+                foreach (var lp in plots)
+                {
+                    if (lp == null) continue;
+                    LandPlotModel m = PlotModelOf(lp);
+                    if (m == null || m.typeId != LandPlot.Id.CORRAL) continue;
+                    corralCenters.Add(lp.transform.position);
+                }
+            }
+            catch (Exception) { corralCenters.Clear(); }
+
+            try
+            {
+                var all = UnityEngine.Object.FindObjectsOfType<Identifiable>();
+                foreach (var idf in all)
+                {
+                    if (idf == null || idf.gameObject == null) continue;
+                    Identifiable.Id iid = idf.id;
+                    bool isSlime = SLIME_IDS.Contains(iid);
+                    bool isPlort = !isSlime && PLORT_IDS.Contains(iid);
+                    if (!isSlime && !isPlort) continue;
+                    // 围栏内家养史莱姆跳过（近似：距任一围栏平台中心 <3.5m 视为栏内）
+                    if (isSlime && corralCenters.Count > 0)
+                    {
+                        bool home = false;
+                        Vector3 ip = idf.transform.position;
+                        foreach (Vector3 cc in corralCenters)
+                        {
+                            if ((ip - cc).sqrMagnitude < 3.5f * 3.5f) { home = true; break; }
+                        }
+                        if (home) continue;
+                    }
+                    float d = Vector3.Distance(p, idf.transform.position);
+                    if (isSlime && d < bestDS) { bestDS = d; bestKindS = "slime"; bestTS = idf.transform.position; }
+                    else if (isPlort && d < bestDP) { bestDP = d; bestKindP = "plort"; bestTP = idf.transform.position; }
+                }
+            }
+            catch (Exception e) { ar.ok = false; ar.note = "扫描目标异常: " + e.Message; return; }
+
+            // 决策：距离优先——谁近追谁（近结晶先吸攒货卖钱，没有再追最近野生史莱姆来养）。
+            // 结晶静态易吸且能真实卖钱，史莱姆动态难吸，故两者同距时优先结晶。
+            float bestD = SEARCH_RADIUS;
+            Vector3 bestT = Vector3.zero;
+            string bestKind = "";
+            if (bestDS < SEARCH_RADIUS || bestDP < SEARCH_RADIUS)
+            {
+                if (bestDP <= bestDS)
+                {
+                    bestD = bestDP; bestT = bestTP; bestKind = bestKindP;
+                }
+                else
+                {
+                    bestD = bestDS; bestT = bestTS; bestKind = bestKindS;
+                }
+            }
+
+            if (bestKind == "")
+            {
+                ar.ok = false; ar.note = "附近 " + (int)SEARCH_RADIUS + "m 内无可抓捕目标";
+                return;
+            }
+
+            // 玩家到目标的水平方向，与 forward 的水平投影求带符号角
+            Vector3 toT = bestT - p;
+            toT.y = 0f;
+            Vector3 flatF = forward; flatF.y = 0f;
+            if (toT.sqrMagnitude < 0.0001f || flatF.sqrMagnitude < 0.0001f)
+            {
+                ar.targetKind = bestKind; ar.dist = bestD; ar.tx = bestT.x; ar.tz = bestT.z;
+                ar.yawDelta = 0f; ar.ok = true;
+                ar.note = "已定位到目标（极近）";
+                return;
+            }
+            float yaw = Vector3.SignedAngle(flatF, toT, Vector3.up); // 负=目标在右
+            ar.targetKind = bestKind;
+            ar.dist = bestD;
+            ar.tx = bestT.x; ar.tz = bestT.z;
+            ar.yawDelta = yaw;
+            ar.ok = true;
+            ar.note = "已定位目标 kind=" + bestKind + " dist=" + bestD.ToString("F1") + "m yaw=" + yaw.ToString("F1") + "°";
+        }
+
+        // ---- 最近围栏感知（真实：纯只读，供 core 吸到史莱姆后真实走到围栏投放）----
+        // 返回最近 CORRAL 地块的 yaw/距离/坐标，core 据此真实走向围栏并投出真空背包里的史莱姆。
+        private void ScanCorralReal(ActionResult ar)
+        {
+            EnsureScene();
+            if (_player == null) { ar.ok = false; ar.note = "未进入存档"; return; }
+            try
+            {
+                var plots = UnityEngine.Object.FindObjectsOfType<LandPlot>();
+                Vector3 p = _player.transform.position;
+                Vector3 forward = _player.transform.forward;
+                ar.px = p.x; ar.py = p.z;
+                float bestD = float.MaxValue;
+                Vector3 bestT = Vector3.zero;
+                foreach (var lp in plots)
+                {
+                    if (lp == null) continue;
+                    LandPlotModel m = PlotModelOf(lp);
+                    if (m == null || m.typeId != LandPlot.Id.CORRAL) continue;
+                    float d = Vector3.Distance(p, lp.transform.position);
+                    if (d < bestD) { bestD = d; bestT = lp.transform.position; }
+                }
+                if (bestD >= float.MaxValue)
+                {
+                    ar.ok = false; ar.note = "场景中没有围栏(CORRAL)";
+                    return;
+                }
+                Vector3 toT = bestT - p;
+                toT.y = 0f;
+                Vector3 flatF = forward; flatF.y = 0f;
+                float yaw = (toT.sqrMagnitude < 0.0001f || flatF.sqrMagnitude < 0.0001f)
+                    ? 0f : Vector3.SignedAngle(flatF, toT, Vector3.up);
+                ar.targetKind = "corral";
+                ar.dist = bestD;
+                ar.tx = bestT.x; ar.tz = bestT.z;
+                ar.yawDelta = yaw;
+                ar.ok = true;
+                ar.note = "已定位最近围栏 dist=" + bestD.ToString("F1") + "m yaw=" + yaw.ToString("F1") + "°";
+            }
+            catch (Exception e) { ar.ok = false; ar.note = "扫描围栏异常: " + e.Message; }
+        }
+
+        // ---- 结晶市场定位（真实：纯只读，供 core 真实走到市场投出结晶换钱）----
+        // 结晶市场是牧场里的固定建筑：玩家把真空背包里的结晶对准投入口投出，立即换成钱。
+        // 市场位置不变，扫描一次后缓存（_cachedMarket），之后每步 scan_market 只用缓存的
+        // 坐标 + 玩家当前位置重算 yaw/dist，避免重复全场景扫描把主线程拖卡（曾致游戏崩溃）。
+        private Vector3? _cachedMarket;
+        private Vector3 _cachedStandDir = Vector3.forward;  // 从投入口指向庭院(站位方向)，水平
+        private bool _marketFailed;
+
+        private Vector3? FindMarketPos()
+        {
+            // 定位结晶市场"投入口开孔"：场景中所有 MarketCollider，y 最高的是抬高开孔，
+            // y 最低的是地面碰撞；由两者差出"朝庭院"方向，作为玩家站位方向。
+            try
+            {
+                var cols = UnityEngine.Object.FindObjectsOfType<BoxCollider>();
+                Vector3? opening = null; float openY = float.MinValue;
+                Vector3? ground = null; float groundY = float.MaxValue;
+                foreach (var c in cols)
+                {
+                    if (c == null || c.transform == null) continue;
+                    string n = c.gameObject != null ? c.gameObject.name : c.name;
+                    if (n.IndexOf("MarketCollider", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                    float y = c.transform.position.y;
+                    if (y > openY) { openY = y; opening = c.transform.position; }
+                    if (y < groundY) { groundY = y; ground = c.transform.position; }
+                }
+                if (opening != null)
+                {
+                    if (ground != null)
+                    {
+                        Vector3 d = ground.Value - opening.Value; d.y = 0f;
+                        if (d.sqrMagnitude > 0.01f) _cachedStandDir = d.normalized;
+                    }
+                    return opening;
+                }
+            }
+            catch (Exception) { }
+            // 兜底：找场景里渲染的"Market"建筑（MeshRenderer，数量远少于全场景 Transform）
+            try
+            {
+                var mrs = UnityEngine.Object.FindObjectsOfType<MeshRenderer>();
+                foreach (var mr in mrs)
+                {
+                    if (mr == null || mr.transform == null) continue;
+                    string n = mr.gameObject != null ? mr.gameObject.name : mr.name;
+                    if (n.IndexOf("Market", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                        n.IndexOf("UI", StringComparison.OrdinalIgnoreCase) < 0)
+                        return mr.transform.position;
+                }
+            }
+            catch (Exception) { }
+            return null;
+        }
+
+        private void ScanMarketReal(ActionResult ar)
+        {
+            EnsureScene();
+            if (_player == null) { ar.ok = false; ar.note = "未进入存档"; return; }
+            try
+            {
+                if (_cachedMarket == null && !_marketFailed)
+                {
+                    _cachedMarket = FindMarketPos();
+                    if (_cachedMarket == null) _marketFailed = true;
+                }
+                if (_cachedMarket == null) { ar.ok = false; ar.note = "场景中找不到结晶市场"; return; }
+                Vector3 p = _player.transform.position;
+                Vector3 forward = _player.transform.forward;
+                ar.px = p.x; ar.py = p.z;
+                Vector3 flatF = forward; flatF.y = 0f;
+                // 站位点：投入口开孔 + 朝庭院方向 * 14m（站在庭院里面对开孔，可把结晶投进去）
+                Vector3 port = _cachedMarket.Value;
+                Vector3 stand = port + _cachedStandDir * 14f;
+                stand.y = p.y;
+                Vector3 toStand = stand - p; toStand.y = 0f;
+                float standDist = Vector3.Distance(p, stand);
+                float standYaw = (toStand.sqrMagnitude < 0.0001f || flatF.sqrMagnitude < 0.0001f)
+                    ? 0f : Vector3.SignedAngle(flatF, toStand, Vector3.up);
+                // 投掷目标：投入口开孔（抬高，需向上投）
+                Vector3 toPort = port - p; toPort.y = 0f;
+                float portYaw = (toPort.sqrMagnitude < 0.0001f || flatF.sqrMagnitude < 0.0001f)
+                    ? 0f : Vector3.SignedAngle(flatF, toPort, Vector3.up);
+                ar.targetKind = "market";
+                ar.dist = standDist;
+                ar.tx = stand.x; ar.tz = stand.z;        // 走向目标 = 庭院站位点
+                ar.cx = port.x; ar.cz = port.z;          // 投掷目标 = 投入口开孔
+                ar.yawDelta = standYaw;
+                ar.cyaw = portYaw;
+                ar.area = ZoneToName(CurrentZone());
+                ar.ok = true;
+                ar.note = "已定位结晶市场投入口 站位=" + standDist.ToString("F1") + "m yaw=" + standYaw.ToString("F1") + "° 区域=" + ar.area;
+            }
+            catch (Exception e) { ar.ok = false; ar.note = "扫描市场异常: " + e.Message; }
+        }
+
+        // ---- 建造（真实：直接走游戏原生购买链路）----
+        // 不再依赖 EmptyPlotUI（购买面板是玩家靠近空地块时才动态生成，桥接场景拿不到），
+        // 而是复用游戏原生三步：LookupDirector.GetPlotPrefab 取建筑 prefab ->
+        //                          PlayerState.SpendCurrency 真实扣钱（与 BuyPlot 同款） ->
+        //                          LandPlotLocation.Replace 真实替换地块（实例化新建筑+更新 GameModel 注册表）。
+        private void BuildReal(string kind, ActionResult ar)
+        {
+            EnsureScene();
+            if (_playerState == null) { ar.ok = false; ar.note = "未进入存档"; return; }
+            if (kind != "corral" && kind != "coop" && kind != "garden")
+            {
+                ar.ok = false; ar.note = "不支持的建筑类型 " + kind;
+                return;
+            }
+
+            LandPlot plot = FindPlotNearPlayer(true);
+            if (plot == null)
+            {
+                ar.ok = false; ar.note = "场景中没有空置地块";
+                return;
+            }
+            LandPlotLocation lpl = plot.transform.parent != null
+                ? plot.transform.parent.GetComponent<LandPlotLocation>() : null;
+            if (lpl == null) { ar.ok = false; ar.note = "该地块没有 LandPlotLocation（无法替换）"; return; }
+
+            LandPlot.Id plotId = KindToPlotId(kind);
+            int cost = PlotCost(kind);
+
+            // 1) 真实建筑 prefab：LookupDirector 按地块类型查（游戏购买面板同源）
+            GameObject prefab = null;
+            try
+            {
+                var gc = GameContext.Instance;
+                if (gc != null && gc.LookupDirector != null)
+                    prefab = gc.LookupDirector.GetPlotPrefab(plotId);
+            }
+            catch (Exception e) { UMFLog.Log("[SlimeBridge] GetPlotPrefab err: " + e.Message); }
+            if (prefab == null) { ar.ok = false; ar.note = "找不到 " + kind + " 的建筑 prefab"; return; }
+
+            int cur = ReadMoneyReal();
+            if (cur < cost) { ar.ok = false; ar.note = "资金不足（需要 $" + cost + "，当前 $" + cur + "）"; return; }
+
+            // 玩家瞬移到地块旁（呈现真实交互位置）
+            Vector3 plotPos = plot.transform.position;
+            RunOnMain(() =>
+            {
+                _player.transform.position = plotPos + plot.transform.forward * 3f + Vector3.up * 1f;
+            });
+
+            // 2) 真实扣钱（与游戏 BuyPlot 完全相同的 SpendCurrency 调用）
+            try
+            {
+                RunOnMain(() => { _playerState.SpendCurrency(cost, true); });
+            }
+            catch (Exception e)
+            {
+                ar.ok = false; ar.note = "扣款失败: " + e.Message;
+                return;
+            }
+
+            // 3) 真实替换地块（游戏原生 Replace：实例化新建筑、销毁旧地块、更新 GameModel）
+            bool ok = false;
+            try
+            {
+                RunOnMain(() => { lpl.Replace(plot, prefab); });
+                ok = true;
+            }
+            catch (Exception e) { UMFLog.Log("[SlimeBridge] LandPlotLocation.Replace err: " + e.Message); }
+
+            ar.ok = ok;
+            ar.area = ZoneToName(CurrentZone());
+            ar.note = ok
+                ? "已建造 " + kind + "（真实地块替换），花费 $" + cost + "，当前资金 $" + ReadMoneyReal() + "（真实）"
+                : "建造失败（地块替换未生效），已退回资金 $" + cost;
+            if (!ok) AddCurrencyReal(cost);
+        }
+
+        private static int PlotCost(string kind)
+        {
+            if (kind == "coop") return 400;
+            if (kind == "garden") return 300;
+            return 225; // corral 基础价
+        }
+
+        // ---- 升级（真实：对已有建筑添加升级项 + 扣除真实资金）----
+        private void UpgradeReal(string kind, ActionResult ar)
+        {
+            EnsureScene();
+            if (_playerState == null) { ar.ok = false; ar.note = "未进入存档"; return; }
+            LandPlot.Upgrade up;
+            if (kind == "corral") up = LandPlot.Upgrade.PLORT_COLLECTOR;
+            else if (kind == "coop") up = LandPlot.Upgrade.FEEDER;
+            else if (kind == "garden") up = LandPlot.Upgrade.SPRINKLER;
+            else { ar.ok = false; ar.note = "不支持升级 " + kind; return; }
+
+            LandPlot plot = FindPlotOfKind(kind);
+            if (plot == null)
+            {
+                ar.ok = false; ar.note = "场景中没有可升级的 " + kind + " 建筑";
+                return;
+            }
+
+            int cost;
+            if (kind == "coop") cost = 650;        // coop 常见升级基准价
+            else if (kind == "garden") cost = 500; // garden 常见升级基准价
+            else cost = 350;                       // corral 常见升级基准价
+            if (ReadMoneyReal() < cost)
+            {
+                ar.ok = false; ar.note = "资金不足（需要约 $" + cost + "，当前 $" + ReadMoneyReal() + "）";
+                return;
+            }
+            AddCurrencyReal(-cost);
+
+            // 把玩家传送到目标地块旁，再添加升级
+            Vector3 plotPos = plot.transform.position;
+            RunOnMain(() =>
+            {
+                _player.transform.position = plotPos + plot.transform.forward * 3f + Vector3.up * 1f;
+            });
+
+            bool ok = false;
+            try
+            {
+                RunOnMain(() => plot.AddUpgrade(up));
+                ok = true;
+            }
+            catch (Exception e) { UMFLog.Log("[SlimeBridge] AddUpgrade err: " + e.Message); }
+
+            ar.ok = ok;
+            ar.note = ok
+                ? "已升级 " + kind + "（" + up + "），花费约 $" + cost + "，当前资金 $" + ReadMoneyReal() + "（真实）"
+                : "升级失败（已升满？），已退回资金 " + cost;
+            if (!ok) AddCurrencyReal(cost);
+        }
+
+        // ---- 状态汇总（整体投放到 Unity 主线程读取）----
+        public GameStatus ReadStatus()
+        {
+            lock (_lock)
+            {
+                var gs = new GameStatus { note = "" };
+                RunOnMain(() =>
+                {
+                    bool loaded = GameLoaded();
+                    int real = loaded ? ReadMoneyReal() : -1;   // 未进存档时资金视为未知
+                    bool estimated = real < 0;
+                    int m = real >= 0 ? real : money;
+
+                    gs.gameLoaded = loaded;
+                    gs.money = m;
+                    gs.moneyEstimated = estimated;
+                    gs.area = ZoneToName(CurrentZone());
+                    gs.note = "strategy=" + strategy + ",game_loaded=" + (loaded ? "true" : "false")
+                              + ",pos=" + PlayerPos();
+
+                    // 设施：真实扫描地块
+                    ScanFacilities();
+                    gs.corralLevel = corralLevel; gs.corralCount = corralCount;
+                    gs.coopLevel = coopLevel; gs.coopCount = coopCount;
+                    gs.gardenLevel = gardenLevel; gs.gardenCount = gardenCount;
+
+                    gs.plorts = "count=" + RefineryTotal() + ",gains=" + plortGain;
+                });
+                return gs;
+            }
+        }
+
+        private void ScanFacilities()
+        {
+            corralCount = coopCount = gardenCount = 0;
+            try
+            {
+                EnsureScene();
+                var plots = UnityEngine.Object.FindObjectsOfType<LandPlot>();
+                foreach (var lp in plots)
+                {
+                    if (lp == null) continue;
+                    LandPlotModel m = PlotModelOf(lp);
+                    if (m == null) continue;
+                    if (m.typeId == LandPlot.Id.CORRAL) corralCount++;
+                    else if (m.typeId == LandPlot.Id.COOP) coopCount++;
+                    else if (m.typeId == LandPlot.Id.GARDEN) gardenCount++;
+                }
+            }
+            catch (Exception) { }
+        }
+
+        public int CurrentMoney() { lock (_lock) { int r = ReadMoneyReal(); return r >= 0 ? r : money; } }
+
+        // ---- 调试：扫描场景中地块/UI/购买项的真实结构 ----
+        private void ProbeNearReal(ActionResult ar, string radiusStr)
+        {
+            // 诊断：输出玩家周围 r 米内所有非触发器碰撞体（名字/位置/类型），
+            // 用来判断角色被什么卡住。
+            try
+            {
+                EnsureScene();
+                if (_player == null) { ar.ok = false; ar.note = "未进入存档"; return; }
+                float r = 15f; float.TryParse(radiusStr, out r);
+                Vector3 p = _player.transform.position;
+                var sb = new System.Text.StringBuilder();
+                sb.Append("player=" + p.ToString("F1") + " zone=" + ZoneToName(CurrentZone()) + "\n");
+                var cols = UnityEngine.Object.FindObjectsOfType<Collider>();
+                int n = 0;
+                foreach (var c in cols)
+                {
+                    if (c == null || c.transform == null) continue;
+                    if (c.isTrigger) continue;
+                    if (Vector3.Distance(p, c.transform.position) > r) continue;
+                    n++;
+                    if (n <= 30)
+                    {
+                        sb.Append("name='" + c.name + "' pos=" + c.transform.position.ToString("F1")
+                                  + " type=" + c.GetType().Name + "\n");
+                    }
+                }
+                sb.Append("nearby colliders=" + n);
+                ar.ok = true;
+                ar.note = sb.ToString();
+            }
+            catch (Exception e) { ar.ok = false; ar.note = "探测异常: " + e.Message; }
+        }
+
+        private void DebugMarketReal(ActionResult ar)
+        {
+            // 一次性诊断：输出结晶市场的朝向 + 场景所有含 "Market" 的对象(位置/缩放/碰撞体)，
+            // 用来确定投入口在哪一侧、站位点该放在建筑哪面。
+            try
+            {
+                EnsureScene();
+                var sb = new System.Text.StringBuilder();
+                Type t = Type.GetType("MarketDirector, Assembly-CSharp");
+                if (t != null)
+                {
+                    object inst = null;
+                    var prop = t.GetProperty("Instance",
+                        BindingFlags.Public | BindingFlags.Static | BindingFlags.FlattenHierarchy);
+                    var field = t.GetField("Instance",
+                        BindingFlags.Public | BindingFlags.Static | BindingFlags.FlattenHierarchy);
+                    if (prop != null) inst = prop.GetValue(null);
+                    else if (field != null) inst = field.GetValue(null);
+                    Component comp = inst as Component;
+                    if (comp != null && comp.transform != null)
+                    {
+                        sb.Append("director pos=" + comp.transform.position.ToString("F1")
+                                  + " fwd=" + comp.transform.forward.ToString("F1")
+                                  + " rot=" + comp.transform.eulerAngles.ToString("F1") + "\n");
+                    }
+                }
+                var all = UnityEngine.Object.FindObjectsOfType<Transform>();
+                int n = 0;
+                foreach (var tr in all)
+                {
+                    if (tr == null) continue;
+                    string nm = tr.name;
+                    if (nm.IndexOf("Market", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                    if (nm.IndexOf("UI", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+                    n++;
+                    if (n <= 20)
+                    {
+                        var mc = tr.GetComponent<Collider>();
+                        sb.Append("obj name='" + nm + "' pos=" + tr.position.ToString("F1")
+                                  + " scale=" + tr.localScale.ToString("F1")
+                                  + " collider=" + (mc != null ? mc.GetType().Name : "-") + "\n");
+                    }
+                }
+                sb.Append("market objects=" + n);
+                ar.ok = true;
+                ar.note = sb.ToString();
+            }
+            catch (Exception e) { ar.ok = false; ar.note = "调试异常: " + e.Message; }
+        }
+
+        private void DebugSceneReal(ActionResult ar)
+        {
+            try
+            {
+                EnsureScene();
+                var sb = new System.Text.StringBuilder();
+                sb.Append("player=" + (PlayerPos().ToString("F1")) + " zone=" + ZoneToName(CurrentZone()) + "\n");
+                var plots = UnityEngine.Object.FindObjectsOfType<LandPlot>();
+                sb.Append("LandPlot count=" + plots.Length + "\n");
+                foreach (var lp in plots)
+                {
+                    if (lp == null) continue;
+                    LandPlotModel m = PlotModelOf(lp);
+                    string type = m != null ? m.typeId.ToString() : "?";
+                    sb.Append("  plot name='" + lp.name + "' type=" + type
+                              + " pos=" + lp.transform.position.ToString("F1"));
+                    var ui = lp.GetComponentInChildren<EmptyPlotUI>(true);
+                    sb.Append(" emptyUI=" + (ui != null ? "YES" : "no"));
+                    var lpui = lp.GetComponent<LandPlotUI>();
+                    sb.Append(" landPlotUI=" + (lpui != null ? "YES" : "no"));
+                    var lpl = lp.transform.parent != null ? lp.transform.parent.GetComponent<LandPlotLocation>() : null;
+                    sb.Append(" location=" + (lpl != null ? "YES" : "no"));
+                    sb.Append("\n");
+                }
+                var euis = UnityEngine.Object.FindObjectsOfType<EmptyPlotUI>();
+                sb.Append("EmptyPlotUI count=" + euis.Length + "\n");
+                foreach (var eui in euis)
+                {
+                    if (eui == null) continue;
+                    LandPlotUI.PlotPurchaseItem item = GetPurchaseItem(eui, "corral");
+                    string has = item != null ? ("cost=" + PurchaseCost(item)
+                                                 + " prefab=" + (PlotPrefabOf(item) != null ? "YES" : "no")) : "noItem";
+                    sb.Append("  eui name='" + eui.name + "' corral:" + has + "\n");
+                }
+                try
+                {
+                    var gc = GameContext.Instance;
+                    if (gc != null && gc.UITemplates != null)
+                    {
+                        sb.Append("purchaseUIPrefab=" + (gc.UITemplates.purchaseUIPrefab != null ? "YES" : "null") + "\n");
+                        var puis = UnityEngine.Object.FindObjectsOfType<PurchaseUI>();
+                        sb.Append("PurchaseUI count=" + puis.Length + "\n");
+                        if (gc.UITemplates.purchaseUIPrefab != null)
+                        {
+                            GameObject inst = UnityEngine.Object.Instantiate(gc.UITemplates.purchaseUIPrefab);
+                            sb.Append("--- purchaseUIPrefab 实例化后组件 ---\n");
+                            foreach (var comp in inst.GetComponentsInChildren<UnityEngine.Component>(true))
+                            {
+                                if (comp == null) continue;
+                                sb.Append("  [" + comp.GetType().Name + "] name='" + comp.name + "'\n");
+                                if (comp is EmptyPlotUI)
+                                {
+                                    var eui = (EmptyPlotUI)comp;
+                                    foreach (var k in new[] { "corral", "coop", "garden" })
+                                    {
+                                        LandPlotUI.PlotPurchaseItem item = GetPurchaseItem(eui, k);
+                                        sb.Append("    " + k + ": cost=" + (item != null ? PurchaseCost(item).ToString() : "?")
+                                                  + " prefab=" + (item != null && PlotPrefabOf(item) != null ? PlotPrefabOf(item).name : "null") + "\n");
+                                    }
+                                }
+                            }
+                            UnityEngine.Object.Destroy(inst);
+                        }
+                    }
+                    else sb.Append("GameContext/UITemplates 不可用\n");
+                }
+                catch (Exception e) { sb.Append("GameContext err: " + e.Message + "\n"); }
+                ar.ok = true;
+                ar.note = sb.ToString();
+            }
+            catch (Exception e)
+            {
+                ar.ok = false; ar.note = "debug_scene 异常: " + e.Message;
+            }
+        }
+
+        private static GameObject PlotPrefabOf(object item)
+        {
+            try
+            {
+                FieldInfo f = typeof(LandPlotUI.PlotPurchaseItem).GetField("plotPrefab",
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                return f != null ? f.GetValue(item) as GameObject : null;
+            }
+            catch (Exception) { return null; }
+        }
+    }
+}

@@ -1,0 +1,65 @@
+# NEKO 插件清单 —— 史莱姆牧场自动游玩
+# 打包选择 package type = "plugin"（独立功能插件）
+[plugin]
+id = "slime_ranch_autopilot"
+name = "史莱姆牧场自动游玩"
+description = "让 NEKO 启动后自动进入史莱姆牧场游戏并接管游玩：建造升级(牧场/鸡圈/菜园)、探索抓捕史莱姆、收集并售卖结晶、有新发现时汇报。支持 V 键在语音指令模式与聊天模式之间切换。"
+version = "0.3.0"
+entry = "plugin.plugins.slime_ranch_autopilot:SlimeRanchAutopilotPlugin"
+type = "plugin"
+author = "NEKO User"
+
+[plugin.sdk]
+recommended = ">=0.1.0,<0.2.0"
+supported = ">=0.1.0,<0.3.0"
+
+[plugin_runtime]
+enabled = true
+auto_start = true
+startup_failure = "warn"
+timeout = 60
+
+[plugin.store]
+enabled = true
+
+[plugin.i18n]
+default_locale = "zh"
+locales_dir = "i18n"
+
+[plugin.ui]
+enabled = true
+
+[[plugin.ui.panel]]
+id = "dashboard"
+title = "控制台"
+entry = "ui/panel.tsx"
+context = "dashboard"
+permissions = ["state:read", "config:read", "action:call", "config:write", "logs:read"]
+
+# ---------- 业务配置（本插件自定义 section，代码中可通过 self.config 读取） ----------
+[slime_ranch]
+# 语音模式下，玩家超过该秒数没有说话，则由 NEKO 自主接管游玩
+timeout_seconds = 10
+# 默认模式：chat(聊天/全程自主) 或 voice(语音指令模式)，可按 V 键切换
+default_mode = "chat"
+# 史莱姆牧场游戏 exe 路径（留空则在启动时自动在常见目录搜索）
+game_exe = "E:\\SteamLibrary\\steamapps\\common\\Slime Rancher\\SlimeRancher.exe"
+# 是否在启动插件时自动启动游戏并进入最近存档
+auto_launch_game = true
+# 自动化核心使用哪个 python 解释器（需已安装 core/requirements.txt 里的依赖；live 抓图需要 Pillow）
+engine_python = "C:\\Users\\zhaod\\AppData\\Local\\Programs\\Python\\Python313\\python.exe"
+# 后端：hybrid = 混合模式(SlimeBridge读状态/资金坐标 + 真实键鼠转向/走路/吸附 + 画面验证,推荐)；
+#       ws    = 通过游戏内 SlimeBridge 桥接读状态/执行(最准但为瞬移式魔法操作,画面不动)；
+#       live  = 真实键鼠控制(截图+模拟键鼠,需校准,汇报可能失真)；
+#       sim   = 纯模拟(不碰游戏,用于演示验收)
+backend = "hybrid"
+# ws 后端(切 backend="ws" 时使用)：SlimeBridge 服务地址(本机即可)
+bridge_host = "127.0.0.1"
+bridge_port = 8124
+# 未安装 tesseract OCR / 读取资金失败时的兜底资金：-1=未知(不主动建造)；>=0 用该值推进自主游玩。
+# 已安装 tesseract 并校准 money_region 后会自动读取真实资金，本值仅作保底。
+live_fallback_funds = 1000
+# live 校准（可选，未校准会退化为通用键盘操作）：
+#   money_region = { "left":0.62, "top":0.02, "width":0.34, "height":0.07 } 资金区(0..1 窗内归一化)
+#   btn_confirm/btn_sell_all/btn_home = [0.5, 0.75]  关键按钮屏内点(0..1 归一化)
+calibration = {}

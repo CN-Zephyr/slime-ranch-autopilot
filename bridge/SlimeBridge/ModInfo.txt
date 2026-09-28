@@ -1,0 +1,10 @@
+SlimeBridge 是供 NEKO 插件（史莱姆牧场自动游玩）读取游戏状态与执行动作的桥接 mod。
+
+启动后在 127.0.0.1:8124 提供 HTTP API：
+  GET  /api/health        存活探针
+  GET  /api/status        游戏状态 {money, facilities, plorts, area, game_loaded}
+  POST /api/action        {"action":"build|upgrade|feed|harvest|sell|explore|go_home|money_add","kind":"corral|coop|garden"}
+
+策略（环境变量 SLIME_BRIDGE_STRATEGY，缺省 native）：
+  native   反射调用游戏真实 API，读写真实资金/设施/结晶。
+  simulate 仅台账记账，用于无游戏环境演示。

@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+.venv-core/
+
+# .NET 构建产物
+bridge/SlimeBridge/bin/
+bridge/SlimeBridge/obj/
+
+# 运行时数据 / 调试截图
+data/
+verify_overlay_*.png
+
+# 本地工具 / IDE
+.trae/
+.vscode/
+.idea/

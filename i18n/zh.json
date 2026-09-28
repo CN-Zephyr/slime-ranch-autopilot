@@ -1,0 +1,51 @@
+{
+  "actions": {
+    "start": { "label": "启动自动游玩" },
+    "stop": { "label": "停止自动游玩" },
+    "setMode": { "label": "切换模式" },
+    "setTimeout": { "label": "保存秒数" },
+    "pushCmd": { "label": "执行指令" }
+  },
+  "entries": {
+    "start": { "name": "启动自动游玩", "desc": "启动自动化核心并接管史莱姆牧场" },
+    "stop": { "name": "停止自动游玩", "desc": "停止自动化核心" },
+    "setmode": { "name": "设置模式", "desc": "chat 全程自主 / voice 语音指令" },
+    "settimeout": { "name": "设置接管秒数", "desc": "语音模式下超过该秒数未说话则自主接管" },
+    "pushcmd": { "name": "执行指令", "desc": "向核心下达一条文字指令" }
+  },
+  "fields": {
+    "mode": "chat 或 voice",
+    "seconds": "秒数",
+    "text": "指令内容",
+    "itemId": "ID"
+  },
+  "dashboard": {
+    "subtitle": "NEKO 接管史莱姆牧场运营",
+    "status": "运行状态",
+    "control": "控制",
+    "config": "设置",
+    "cmd": "手动指令（测试/远程指挥）",
+    "reports": "新发现汇报（最近12条）",
+    "noReports": "暂无新发现汇报"
+  },
+  "f": {
+    "running": "运行中",
+    "mode": "模式",
+    "phase": "阶段",
+    "funds": "资金",
+    "discovery": "最新发现",
+    "pid": "核心PID",
+    "timeout": "语音无输入接管秒数",
+    "cmd": "指令文本",
+    "report": "内容"
+  },
+  "m": { "voice": "语音指令", "chat": "聊天/自主" },
+  "btn": {
+    "start": "启动",
+    "stop": "停止",
+    "modeVoice": "切到语音指令",
+    "modeChat": "切到聊天/自主",
+    "saveTimeout": "保存秒数",
+    "cmd": "执行"
+  }
+}
