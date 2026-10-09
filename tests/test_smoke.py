@@ -24,12 +24,11 @@ from core.explore import decide_explore_area, pick_new_slime  # noqa: E402
 
 class ManifestTests(unittest.TestCase):
     def test_identity_lock(self):
-        folder = os.path.basename(HERE)
         self.assertEqual(MANIFEST["plugin"]["id"], "slime_ranch_autopilot")
-        self.assertEqual(MANIFEST["plugin"]["id"], folder)
         main_map = MANIFEST["plugin"]["entry"].split(":")
         self.assertEqual(main_map[0], f"plugin.plugins.{MANIFEST['plugin']['id']}")
         self.assertTrue(main_map[1].endswith("Plugin"))
+        self.assertEqual(MANIFEST["slime_ranch"]["default_mode"], "watch")
 
     def test_runtime_booleans(self):
         rt = MANIFEST["plugin_runtime"]
@@ -47,24 +46,22 @@ class ManifestTests(unittest.TestCase):
 
 class RanchLogicTests(unittest.TestCase):
     def test_2x_gate_blocks_when_not_enough(self):
-        st = RanchState()  # 全 0，未建
-        # corral 首次建造 100，需 200。资金 150 -> 不建
-        self.assertIsNone(decide_build_action(st, funds=150))
-        # 资金 200 -> 建 corral
-        act = decide_build_action(st, funds=200)
-        self.assertEqual(act, {"mode": "build", "kind": "corral", "cost": 100})
+        st = RanchState()
+        self.assertIsNone(decide_build_action(st, funds=400))
+        act = decide_build_action(st, funds=450)
+        self.assertEqual(act, {"mode": "build", "kind": "corral", "cost": 225})
 
     def test_costs(self):
-        self.assertEqual(facility_cost("corral", 1), 100)
-        self.assertEqual(facility_cost("coop", 2), 350)
+        self.assertEqual(facility_cost("corral", 1), 225)
+        self.assertEqual(facility_cost("coop", 2), 650)
 
     def test_priorities_corral_then_coop_then_garden(self):
         st = RanchState()
-        self.assertEqual(decide_build_action(st, 300)["kind"], "corral")
+        self.assertEqual(decide_build_action(st, 450)["kind"], "corral")
         st.level["corral"] = 1
-        self.assertEqual(decide_build_action(st, 300)["kind"], "coop")
+        self.assertEqual(decide_build_action(st, 800)["kind"], "coop")
         st.level["coop"] = 1
-        self.assertEqual(decide_build_action(st, 300)["kind"], "garden")
+        self.assertEqual(decide_build_action(st, 600)["kind"], "garden")
 
 
 class SimTests(unittest.TestCase):
@@ -75,7 +72,7 @@ class SimTests(unittest.TestCase):
 
     def test_build_consumes_funds(self):
         self.sim.build("corral")
-        self.assertEqual(self.sim.funds, 700)
+        self.assertEqual(self.sim.funds, 575)
         self.assertEqual(self.sim.facilities["corral"], 1)
 
     def test_explore_catches_and_dedups(self):

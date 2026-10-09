@@ -3,7 +3,7 @@
 [plugin]
 id = "slime_ranch_autopilot"
 name = "史莱姆牧场自动游玩"
-description = "让 NEKO 启动后自动进入史莱姆牧场游戏并接管游玩：建造升级(牧场/鸡圈/菜园)、探索抓捕史莱姆、收集并售卖结晶、有新发现时汇报。支持 V 键在语音指令模式与聊天模式之间切换。"
+description = "让 NEKO 连接《史莱姆牧场》。默认观望，不操作游戏。按 V 键进入自主经营：先到结晶市场，再投喂、收结晶卖掉，钱够费用两倍才建造或升级。"
 version = "0.3.0"
 entry = "plugin.plugins.slime_ranch_autopilot:SlimeRanchAutopilotPlugin"
 type = "plugin"
@@ -40,14 +40,14 @@ permissions = ["state:read", "config:read", "action:call", "config:write", "logs
 [slime_ranch]
 # 语音模式下，玩家超过该秒数没有说话，则由 NEKO 自主接管游玩
 timeout_seconds = 10
-# 默认模式：chat(聊天/全程自主) 或 voice(语音指令模式)，可按 V 键切换
-default_mode = "chat"
-# 史莱姆牧场游戏 exe 路径（留空则在启动时自动在常见目录搜索）
-game_exe = "E:\\SteamLibrary\\steamapps\\common\\Slime Rancher\\SlimeRancher.exe"
+# 默认模式：watch(观望，不操作) 或 ranch(自主经营)。按 V 键切换。
+default_mode = "watch"
+# 史莱姆牧场一代 exe。留空时核心会在常见 Steam 目录里找；找不到就不自动启动游戏。
+game_exe = ""
 # 是否在启动插件时自动启动游戏并进入最近存档
 auto_launch_game = true
-# 自动化核心使用哪个 python 解释器（需已安装 core/requirements.txt 里的依赖；live 抓图需要 Pillow）
-engine_python = "C:\\Users\\zhaod\\AppData\\Local\\Programs\\Python\\Python313\\python.exe"
+# 留空则用启动 NEKO 的那个 Python。需要键鼠和截图依赖时，改成 setup.bat 建出的解释器。
+engine_python = ""
 # 后端：hybrid = 混合模式(SlimeBridge读状态/资金坐标 + 真实键鼠转向/走路/吸附 + 画面验证,推荐)；
 #       ws    = 通过游戏内 SlimeBridge 桥接读状态/执行(最准但为瞬移式魔法操作,画面不动)；
 #       live  = 真实键鼠控制(截图+模拟键鼠,需校准,汇报可能失真)；

@@ -39,10 +39,12 @@ def run_checks() -> list[str]:
     p = m.get("plugin", {})
     folder = os.path.basename(HERE)
 
-    if not p.get("id"):
+    ident = p.get("id") or ""
+    folder_matches = folder == ident or folder.replace("-", "_") == ident
+    if not ident:
         problems.append("[ident] plugin.id 缺失")
-    if p.get("id") != folder:
-        problems.append(f"[ident] plugin.id({p.get('id')}) 与文件夹名({folder})不一致")
+    elif not folder_matches:
+        problems.append(f"[ident] plugin.id({ident}) 与文件夹名({folder})不一致")
     if not p.get("entry"):
         problems.append("[ident] plugin.entry 缺失")
     else:
@@ -51,7 +53,7 @@ def run_checks() -> list[str]:
             problems.append(f"[ident] plugin.entry 应为 module:Class：{p['entry']}")
         else:
             e_mod, e_cls = ep
-            expect = f"plugin.plugins.{folder}:{e_cls}"
+            expect = f"plugin.plugins.{ident}:{e_cls}"
             if p["entry"] != expect:
                 problems.append(f"[ident] 入口应为 {expect}，当前 {p['entry']}")
 

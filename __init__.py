@@ -161,7 +161,7 @@ class SlimeRanchAutopilotPlugin(NekoPluginBase):
     def _sync_config_to_disk(self) -> None:
         cfg = {
             "timeout_seconds": int(_get_cfg(self, "timeout_seconds", 10)),
-            "default_mode": _get_cfg(self, "default_mode", "chat"),
+            "default_mode": _get_cfg(self, "default_mode", "watch"),
             "game_exe": _get_cfg(self, "game_exe", ""),
             "auto_launch_game": bool(_get_cfg(self, "auto_launch_game", True)),
             "engine_python": _get_cfg(self, "engine_python", ""),
@@ -342,17 +342,21 @@ class SlimeRanchAutopilotPlugin(NekoPluginBase):
     @plugin_entry(
         id="set_mode",
         name=tr("entries.setmode.name", default="设置模式"),
-        description=tr("entries.setmode.desc", default="chat 全程自主 / voice 语音指令模式"),
+        description=tr("entries.setmode.desc", default="watch 观望 / ranch 自主经营"),
         input_schema={
             "type": "object",
-            "properties": {"mode": {"type": "string", "description": tr("fields.mode", default="chat 或 voice")}},
+            "properties": {"mode": {"type": "string", "description": tr("fields.mode", default="watch 或 ranch")}},
             "required": ["mode"],
         },
     )
-    async def set_mode(self, mode: str = "chat", **_):
+    async def set_mode(self, mode: str = "watch", **_):
         mode = mode.strip().lower()
-        if mode not in ("chat", "voice"):
-            return Err(SdkError("mode 只支持 chat 或 voice"))
+        if mode == "chat":
+            mode = "watch"
+        elif mode == "voice":
+            mode = "ranch"
+        if mode not in ("watch", "ranch"):
+            return Err(SdkError("mode 只支持 watch 或 ranch"))
         self._write_command({"type": "set_mode", "mode": mode})
         return Ok({"mode": mode})
 

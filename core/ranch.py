@@ -10,14 +10,13 @@ from typing import Dict, List
 FACILITY_ORDER = ["corral", "coop", "garden"]
 FACILITY_NAMES = {"corral": "牧场/围栏", "coop": "鸡圈", "garden": "菜园"}
 
-# 每个设施 0 级(未建) -> max 级 的建造/升级费用（与游戏真实价格一致）：
-#   corral 建 225；coop 建 400；garden 建 300（升级取该设施常见升级的基准价）
+# 每种设施只做一次建造和一次升级。mod 对每种建筑只加一个固定升级件。
 BASE_COSTS = {
-    "corral": [225, 350, 350],   # 建围栏225，升1级350，升2级350
-    "coop":   [400, 650, 650],
-    "garden": [300, 500, 500],
+    "corral": [225, 350],
+    "coop": [400, 650],
+    "garden": [300, 500],
 }
-MAX_LEVEL = 3  # level 0 = 未建；建后 level=1；max 级 = MAX_LEVEL
+MAX_LEVEL = 2  # 0=未建，1=已建，2=已加那一个升级件
 
 
 @dataclass

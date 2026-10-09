@@ -7,41 +7,37 @@
     <RootNamespace>SlimeBridge</RootNamespace>
     <AssemblyName>SlimeBridge</AssemblyName>
     <Nullable>disable</Nullable>
-    <!-- UMF 官方参考 mod(SRCheatMenu) 用 net462 + 引用游戏 Managed 目录。 -->
+    <GameManaged Condition="'$(GameManaged)'==''">D:\SteamLibrary\steamapps\common\Slime Rancher\SlimeRancher_Data\Managed</GameManaged>
   </PropertyGroup>
 
   <ItemGroup>
     <!-- 引用游戏真实 dll，路径按本机实际安装位置 -->
     <Reference Include="Assembly-CSharp">
-      <HintPath>E:\SteamLibrary\steamapps\common\Slime Rancher\SlimeRancher_Data\Managed\Assembly-CSharp.dll</HintPath>
+      <HintPath>$(GameManaged)\Assembly-CSharp.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine">
-      <HintPath>E:\SteamLibrary\steamapps\common\Slime Rancher\SlimeRancher_Data\Managed\UnityEngine.dll</HintPath>
+      <HintPath>$(GameManaged)\UnityEngine.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.CoreModule">
-      <HintPath>E:\SteamLibrary\steamapps\common\Slime Rancher\SlimeRancher_Data\Managed\UnityEngine.CoreModule.dll</HintPath>
+      <HintPath>$(GameManaged)\UnityEngine.CoreModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.TextRenderingModule">
-      <HintPath>E:\SteamLibrary\steamapps\common\Slime Rancher\SlimeRancher_Data\Managed\UnityEngine.TextRenderingModule.dll</HintPath>
+      <HintPath>$(GameManaged)\UnityEngine.TextRenderingModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.PhysicsModule">
-      <HintPath>E:\SteamLibrary\steamapps\common\Slime Rancher\SlimeRancher_Data\Managed\UnityEngine.PhysicsModule.dll</HintPath>
+      <HintPath>$(GameManaged)\UnityEngine.PhysicsModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.IMGUIModule">
-      <HintPath>E:\SteamLibrary\steamapps\common\Slime Rancher\SlimeRancher_Data\Managed\UnityEngine.IMGUIModule.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
-    <Reference Include="uModFramework">
-      <HintPath>E:\SteamLibrary\steamapps\common\Slime Rancher\SlimeRancher_Data\Managed\uModFramework.dll</HintPath>
+      <HintPath>$(GameManaged)\UnityEngine.IMGUIModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityCoreMod">
-      <HintPath>E:\SteamLibrary\steamapps\common\Slime Rancher\SlimeRancher_Data\Managed\UnityCoreMod.dll</HintPath>
+      <HintPath>$(GameManaged)\UnityCoreMod.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="System.Net">

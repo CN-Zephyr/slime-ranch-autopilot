@@ -9,12 +9,12 @@
   "entries": {
     "start": { "name": "启动自动游玩", "desc": "启动自动化核心并接管史莱姆牧场" },
     "stop": { "name": "停止自动游玩", "desc": "停止自动化核心" },
-    "setmode": { "name": "设置模式", "desc": "chat 全程自主 / voice 语音指令" },
+    "setmode": { "name": "设置模式", "desc": "watch 观望 / ranch 自主经营" },
     "settimeout": { "name": "设置接管秒数", "desc": "语音模式下超过该秒数未说话则自主接管" },
     "pushcmd": { "name": "执行指令", "desc": "向核心下达一条文字指令" }
   },
   "fields": {
-    "mode": "chat 或 voice",
+    "mode": "watch 或 ranch",
     "seconds": "秒数",
     "text": "指令内容",
     "itemId": "ID"
@@ -39,12 +39,12 @@
     "cmd": "指令文本",
     "report": "内容"
   },
-  "m": { "voice": "语音指令", "chat": "聊天/自主" },
+  "m": { "watch": "观望", "ranch": "自主经营" },
   "btn": {
     "start": "启动",
     "stop": "停止",
-    "modeVoice": "切到语音指令",
-    "modeChat": "切到聊天/自主",
+    "modeRanch": "切到自主经营",
+    "modeWatch": "切到观望",
     "saveTimeout": "保存秒数",
     "cmd": "执行"
   }
