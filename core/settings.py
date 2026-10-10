@@ -9,8 +9,8 @@ from typing import Dict, Any
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "timeout_seconds": 10,
-    "default_mode": "chat",
-    "game_exe": r"E:\SteamLibrary\steamapps\common\Slime Rancher\SlimeRancher.exe",
+    "default_mode": "watch",
+    "game_exe": "",
     "auto_launch_game": True,
     "engine_python": "",
     "backend": "hybrid",  # hybrid=混合(桥接感知+真实键鼠执行,推荐)；ws=桥接；sim=模拟；live=键鼠校准
@@ -22,11 +22,38 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 }
 
 
+def _resolve_game_exe(explicit: str) -> str:
+    """配置路径不存在时，到常见 Steam 目录里找一代游戏。找不到就留空。"""
+    if explicit and os.path.exists(explicit):
+        return explicit
+    roots = [
+        os.path.join(os.environ.get("ProgramFiles(x86)", ""), "Steam", "steamapps", "common", "Slime Rancher", "SlimeRancher.exe"),
+        os.path.join(os.environ.get("ProgramFiles", ""), "Steam", "steamapps", "common", "Slime Rancher", "SlimeRancher.exe"),
+    ]
+    for drive in ("C", "D", "E", "F", "G"):
+        roots.append(rf"{drive}:\SteamLibrary\steamapps\common\Slime Rancher\SlimeRancher.exe")
+        roots.append(rf"{drive}:\Steam\steamapps\common\Slime Rancher\SlimeRancher.exe")
+    for path in roots:
+        if path and os.path.exists(path):
+            return path
+    return ""
+
+
+def _normalize_mode(value: Any) -> str:
+    """watch=观望，ranch=自主经营。旧配置 chat/voice 映射过来。"""
+    mode = str(value or "watch").strip().lower()
+    if mode == "voice":
+        return "ranch"
+    if mode == "ranch":
+        return "ranch"
+    return "watch"
+
+
 @dataclass
 class Settings:
     data_dir: str = ""
     timeout_seconds: int = 10
-    default_mode: str = "chat"       # chat 全程自主 / voice 语音指令
+    default_mode: str = "watch"      # watch 观望 / ranch 自主经营
     game_exe: str = ""
     auto_launch_game: bool = True
     backend: str = "sim"             # sim | live | ws
@@ -58,8 +85,8 @@ class Settings:
                 pass
         settings = Settings(data_dir=data_dir)
         settings.timeout_seconds = max(1, int(cfg.get("timeout_seconds", 10)))
-        settings.default_mode = cfg.get("default_mode", "chat")
-        settings.game_exe = cfg.get("game_exe", "")
+        settings.default_mode = _normalize_mode(cfg.get("default_mode", "watch"))
+        settings.game_exe = _resolve_game_exe(str(cfg.get("game_exe", "") or ""))
         settings.auto_launch_game = bool(cfg.get("auto_launch_game", True))
         settings.backend = cfg.get("backend", "sim")
         settings.bridge_host = cfg.get("bridge_host", "127.0.0.1")

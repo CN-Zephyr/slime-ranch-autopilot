@@ -1,15 +1,15 @@
 # 史莱姆牧场自动游玩 (NEKO 插件)
 
-让 NEKO 启动后自动进入《史莱姆牧场》并接管游玩，支持 **V 键** 在【聊天/全程自主】与【语音指令】模式间切换；语音模式下玩家可用语音下达指令，超过可配置秒数（默认 10s）无人说话则由 NEKO 自主接管。
+让 NEKO 连接《史莱姆牧场》一代。默认是观望：不操作游戏，屏幕分享由玩家自己开。按 **V 键** 进入自主经营：先到结晶市场重置位置，然后在牧场里收食物并投喂、收结晶卖掉。资金达到下一档费用的两倍，才建造或升级围栏、鸡圈、菜园。每种建筑只建一次，再加一个升级件。
 
 ## 功能
 | 需求 | 实现位置 |
 | --- | --- |
-| 建造/升级 牧场·鸡圈·菜园，资金>2倍升级费才升级 | `core/ranch.py` 决策 + `core/main_controller.py` |
-| 探索地图、抓捕史莱姆回牧场 | `core/explore.py` + `core/sim.py`(SIM) |
-| 收集结晶并在集市售卖 | `core/sim.py` / `LiveIOController` |
-| 有新发现时推送汇报 | `core/comms.py` `report_discovery` |
-| V 键模式切换 + 语音指令 + 超时接管 | `core/voice.py` + `core/main_controller.py` |
+| 观望 / 自主经营，V 键切换 | `core/voice.py` + `core/main_controller.py` |
+| 走到或传送到结晶市场 | `core/real.py` `approach_market` + `GameState.cs` `tp_market` |
+| 收食物、投进围栏、收结晶并卖出 | `core/real.py` + `GameState.cs` 的 `scan_food` / `scan_plort` |
+| 建造/升级，资金达到费用两倍才动手 | `core/ranch.py` + `core/main_controller.py` |
+| 新建设施时汇报 | `core/comms.py` `report_discovery` |
 
 ## 结构
 ```
@@ -20,14 +20,14 @@ slime_ranch_autopilot/
 ├── run_standalone.py      # 脱离 NEKO 独立运行核心（支持 SIM 验收 / live）
 ├── setup.bat              # 一键安装依赖（建 .venv-core）
 ├── core/                  # 自动化核心（可独立进程）
-│   ├── main_controller.py # 大脑/状态机 + 模式切换 + 超时接管
+│   ├── main_controller.py # 观望 / 自主经营
 │   ├── game.py            # 启动游戏 + 键鼠动作 + 指令执行器
-│   ├── bridge.py          # ws 后端：通过游戏内 SlimeBridge 桥接读状态/执行(推荐)
-│   ├── vision.py          # 截图 / 模板匹配 / OCR（live）
-│   ├── ranch.py           # 基础设施建造/升级决策（2x 规则）
-│   ├── explore.py         # 探索/抓捕/售卖决策
-│   ├── sim.py             # SIM 后端（无游戏也能验证四项要求）
-│   ├── voice.py           # faster-whisper 语音 + V 键热键
+│   ├── bridge.py          # 连游戏内 SlimeBridge
+│   ├── vision.py          # 截图，用来确认吸附是否真的发生
+│   ├── ranch.py           # 建造/升级决策（2 倍资金，每种建筑一次升级）
+│   ├── explore.py         # 仅模拟模式还保留的区域名单
+│   ├── sim.py             # SIM 后端
+│   ├── voice.py           # V 键热键（pynput，否则 Windows 钩子）
 │   ├── comms.py           # 进程间文件通信 + 新发现汇报去重
 │   └── settings.py        # 配置加载
 ├── ui/panel.tsx           # Hosted UI 控制台（状态/按钮/秒数设置）

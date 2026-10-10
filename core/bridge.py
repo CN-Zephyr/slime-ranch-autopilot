@@ -226,6 +226,36 @@ class BridgeIOController:
             "note": res.get("note", ""),
         }
 
+    def _scan_aim(self, action: str, empty_note: str) -> Dict[str, Any]:
+        res = self._post_action(action)
+        if not res.get("ok"):
+            return {"ok": False, "dist": 1e9, "yaw": 0.0, "note": res.get("note", empty_note)}
+        def f(key, default):
+            try:
+                v = res.get(key, default)
+                return float(v) if v is not None and v != "" else default
+            except Exception:
+                return default
+        return {
+            "ok": True,
+            "kind": res.get("target_kind", ""),
+            "dist": f("dist", 1e9),
+            "yaw": f("yaw_delta", 0.0),
+            "px": f("px", 0.0), "py": f("py", 0.0),
+            "tx": f("tx", 0.0), "tz": f("tz", 0.0),
+            "note": res.get("note", ""),
+        }
+
+    def scan_food(self) -> Dict[str, Any]:
+        return self._scan_aim("scan_food", "附近没有食物")
+
+    def scan_plort(self) -> Dict[str, Any]:
+        return self._scan_aim("scan_plort", "附近没有结晶")
+
+    def tp_market(self) -> Dict[str, Any]:
+        res = self._post_action("tp_market")
+        return {"ok": res.get("ok", False), "note": res.get("note", "传送到市场失败")}
+
     def build(self, kind: str) -> Dict[str, Any]:
         st = self._get_status()
         lvl = (st.get("facilities") or {}).get(kind, {}).get("level", 0)

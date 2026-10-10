@@ -538,6 +538,9 @@ namespace SlimeBridge
                             case "target": ScanTargetReal(ar); break;
                             case "scan_corral": ScanCorralReal(ar); break;
                             case "scan_market": ScanMarketReal(ar); break;
+                            case "scan_food": ScanFoodReal(ar); break;
+                            case "scan_plort": ScanPlortReal(ar); break;
+                            case "tp_market": TeleportMarketReal(ar); break;
                             case "debug_market": DebugMarketReal(ar); break;
                             case "probe": ProbeNearReal(ar, kind); break;
                             case "continue": ContinueSaveReal(ar); break;
@@ -878,6 +881,100 @@ namespace SlimeBridge
             ar.note = "已定位目标 kind=" + bestKind + " dist=" + bestD.ToString("F1") + "m yaw=" + yaw.ToString("F1") + "°";
         }
 
+        private static bool IsFood(Identifiable.Id id)
+        {
+            string n = id.ToString();
+            if (n.IndexOf("PLORT", StringComparison.Ordinal) >= 0) return false;
+            if (n.IndexOf("SLIME", StringComparison.Ordinal) >= 0) return false;
+            return n.IndexOf("FRUIT", StringComparison.Ordinal) >= 0
+                || n.IndexOf("VEGGIE", StringComparison.Ordinal) >= 0
+                || n.IndexOf("HEN", StringComparison.Ordinal) >= 0
+                || n.IndexOf("ROOSTER", StringComparison.Ordinal) >= 0
+                || n.IndexOf("CHICK", StringComparison.Ordinal) >= 0;
+        }
+
+        private void FillAim(ActionResult ar, Vector3 target, string kind, float dist, string note)
+        {
+            Vector3 p = _player.transform.position;
+            Vector3 forward = _player.transform.forward;
+            ar.px = p.x; ar.py = p.z;
+            Vector3 toT = target - p; toT.y = 0f;
+            Vector3 flatF = forward; flatF.y = 0f;
+            float yaw = 0f;
+            if (toT.sqrMagnitude > 0.0001f && flatF.sqrMagnitude > 0.0001f)
+                yaw = Vector3.SignedAngle(flatF, toT, Vector3.up);
+            ar.targetKind = kind;
+            ar.dist = dist;
+            ar.tx = target.x; ar.tz = target.z;
+            ar.yawDelta = yaw;
+            ar.ok = true;
+            ar.note = note;
+        }
+
+        // 牧场经营：只找食物（水果/蔬菜/鸡），围栏里正在被吃的不算。
+        private void ScanFoodReal(ActionResult ar)
+        {
+            ScanProduce(ar, true, 60f, "食物");
+        }
+
+        // 牧场经营：只找落地结晶，不追史莱姆。
+        private void ScanPlortReal(ActionResult ar)
+        {
+            ScanProduce(ar, false, 40f, "结晶");
+        }
+
+        private void ScanProduce(ActionResult ar, bool food, float radius, string label)
+        {
+            EnsureScene();
+            if (_player == null) { ar.ok = false; ar.note = "未进入存档"; return; }
+            Vector3 p = _player.transform.position;
+            List<Vector3> corrals = new List<Vector3>();
+            try
+            {
+                foreach (var lp in UnityEngine.Object.FindObjectsOfType<LandPlot>())
+                {
+                    if (lp == null) continue;
+                    LandPlotModel m = PlotModelOf(lp);
+                    if (m != null && m.typeId == LandPlot.Id.CORRAL)
+                        corrals.Add(lp.transform.position);
+                }
+            }
+            catch (Exception) { }
+            float best = radius;
+            Vector3 bestT = Vector3.zero;
+            bool found = false;
+            try
+            {
+                foreach (var idf in UnityEngine.Object.FindObjectsOfType<Identifiable>())
+                {
+                    if (idf == null || idf.gameObject == null) continue;
+                    bool match = food ? IsFood(idf.id) : PLORT_IDS.Contains(idf.id);
+                    if (!match) continue;
+                    Vector3 ip = idf.transform.position;
+                    if (food)
+                    {
+                        bool inCorral = false;
+                        foreach (Vector3 cc in corrals)
+                        {
+                            if ((ip - cc).sqrMagnitude < 4f * 4f) { inCorral = true; break; }
+                        }
+                        if (inCorral) continue;
+                    }
+                    float d = Vector3.Distance(p, ip);
+                    if (d < best) { best = d; bestT = ip; found = true; }
+                }
+            }
+            catch (Exception e) { ar.ok = false; ar.note = "扫描" + label + "异常: " + e.Message; return; }
+            if (!found)
+            {
+                ar.ok = false;
+                ar.note = "附近没有" + label;
+                return;
+            }
+            FillAim(ar, bestT, food ? "food" : "plort", best,
+                "已定位" + label + " dist=" + best.ToString("F1") + "m");
+        }
+
         // ---- 最近围栏感知（真实：纯只读，供 core 吸到史莱姆后真实走到围栏投放）----
         // 返回最近 CORRAL 地块的 yaw/距离/坐标，core 据此真实走向围栏并投出真空背包里的史莱姆。
         private void ScanCorralReal(ActionResult ar)
@@ -1015,6 +1112,30 @@ namespace SlimeBridge
             catch (Exception e) { ar.ok = false; ar.note = "扫描市场异常: " + e.Message; }
         }
 
+        // 人不在主牧场时，直接放到结晶市场站位点，用来重置位置。
+        private void TeleportMarketReal(ActionResult ar)
+        {
+            EnsureScene();
+            if (_player == null) { ar.ok = false; ar.note = "未进入存档"; return; }
+            try
+            {
+                if (_cachedMarket == null && !_marketFailed)
+                {
+                    _cachedMarket = FindMarketPos();
+                    if (_cachedMarket == null) _marketFailed = true;
+                }
+                if (_cachedMarket == null) { ar.ok = false; ar.note = "场景中找不到结晶市场"; return; }
+                Vector3 stand = _cachedMarket.Value + _cachedStandDir * 14f;
+                stand.y = _player.transform.position.y;
+                Vector3 dest = stand + Vector3.up * 0.5f;
+                RunOnMain(() => { _player.transform.position = dest; });
+                ar.ok = true;
+                ar.area = "牧场";
+                ar.note = "已传送到结晶市场前";
+            }
+            catch (Exception e) { ar.ok = false; ar.note = "传送到市场失败: " + e.Message; }
+        }
+
         // ---- 建造（真实：直接走游戏原生购买链路）----
         // 不再依赖 EmptyPlotUI（购买面板是玩家靠近空地块时才动态生成，桥接场景拿不到），
         // 而是复用游戏原生三步：LookupDirector.GetPlotPrefab 取建筑 prefab ->
@@ -1056,13 +1177,6 @@ namespace SlimeBridge
 
             int cur = ReadMoneyReal();
             if (cur < cost) { ar.ok = false; ar.note = "资金不足（需要 $" + cost + "，当前 $" + cur + "）"; return; }
-
-            // 玩家瞬移到地块旁（呈现真实交互位置）
-            Vector3 plotPos = plot.transform.position;
-            RunOnMain(() =>
-            {
-                _player.transform.position = plotPos + plot.transform.forward * 3f + Vector3.up * 1f;
-            });
 
             // 2) 真实扣钱（与游戏 BuyPlot 完全相同的 SpendCurrency 调用）
             try
@@ -1127,13 +1241,6 @@ namespace SlimeBridge
                 return;
             }
             AddCurrencyReal(-cost);
-
-            // 把玩家传送到目标地块旁，再添加升级
-            Vector3 plotPos = plot.transform.position;
-            RunOnMain(() =>
-            {
-                _player.transform.position = plotPos + plot.transform.forward * 3f + Vector3.up * 1f;
-            });
 
             bool ok = false;
             try

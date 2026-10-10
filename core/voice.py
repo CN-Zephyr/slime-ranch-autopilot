@@ -1,12 +1,9 @@
-"""语音输入(faster-whisper) + V 键热键暂停/恢复。
+"""V 键热键：在观望和自主经营之间切换。
 
-- V 键：暂停/恢复自动游玩（paused 开关），全局热键不受游戏窗口焦点影响。
-- voice 模式：监听玩家语音，翻译为文字返回给大脑执行；超过 timeout_seconds 无输入，
-  大脑切换回自主接管。
-所有重型依赖(faster-whisper / sounddevice / pynput)均为可选：缺失时优雅降级
-（在纯 SIM/无权限环境也能运行；真实语音需按 README 安装依赖）。
+优先用 pynput。没有 pynput 时，在 Windows 上用系统低级键盘钩子，同样不要求游戏窗口在前台。
 """
 from __future__ import annotations
+import sys
 import threading
 import time
 from typing import Callable, Optional
@@ -63,26 +60,30 @@ class VoiceInput:
 
 
 class HotkeyListener:
-    """全局低延迟热键守卫。回调必须短小，重逻辑放线程/队列。
+    """全局低延迟热键。回调必须短小，重逻辑放线程/队列。
 
-    V 键 = 暂停/恢复自动游玩开关（paused）。不改变 chat/voice 模式，
-    模式切换仍走指令/配置文件。
+    V 键在观望和自主经营之间切换。
     """
 
-    def __init__(self, on_toggle: Callable[[bool], None]):
+    def __init__(self, on_toggle: Callable[[], None]):
         self.on_toggle = on_toggle
-        self.paused = False
         self._last_toggle_ts = 0.0          # 防抖：按住 V 时系统自动重复触发，只响应首次
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
+        self._hook_ready = threading.Event()
+        self._hook_ok = False
+
+    def _fire(self) -> None:
+        now = time.time()
+        if now - self._last_toggle_ts <= 0.35:
+            return
+        self._last_toggle_ts = now
+        self.toggle()
 
     def _listen(self) -> None:
         def on_press(key):
             if getattr(key, "char", None) == "v":
-                now = time.time()
-                if now - self._last_toggle_ts > 0.35:   # 350ms 防抖，忽略自动重复
-                    self._last_toggle_ts = now
-                    self.toggle()
+                self._fire()
 
         def on_release(key):
             return True
@@ -94,24 +95,72 @@ class HotkeyListener:
         except Exception:
             pass
 
+    def _listen_win32(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        WH_KEYBOARD_LL = 13
+        WM_KEYDOWN = 0x0100
+        PM_REMOVE = 1
+        VK_V = 0x56
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+        class KBDLLHOOKSTRUCT(ctypes.Structure):
+            _fields_ = [
+                ("vkCode", wintypes.DWORD),
+                ("scanCode", wintypes.DWORD),
+                ("flags", wintypes.DWORD),
+                ("time", wintypes.DWORD),
+                ("dwExtraInfo", ctypes.c_void_p),
+            ]
+
+        HOOKPROC = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
+
+        def handler(nCode, wParam, lParam):
+            if nCode >= 0 and wParam == WM_KEYDOWN:
+                info = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+                if info.vkCode == VK_V and not (info.flags & 0x10):
+                    self._fire()
+            return user32.CallNextHookEx(None, nCode, wParam, lParam)
+
+        self._hook_proc = HOOKPROC(handler)
+        hook = user32.SetWindowsHookExW(WH_KEYBOARD_LL, self._hook_proc, kernel32.GetModuleHandleW(None), 0)
+        self._hook_ok = bool(hook)
+        self._hook_ready.set()
+        if not hook:
+            return
+        msg = wintypes.MSG()
+        try:
+            while not self._stop.is_set():
+                while user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, PM_REMOVE):
+                    user32.TranslateMessage(ctypes.byref(msg))
+                    user32.DispatchMessageW(ctypes.byref(msg))
+                time.sleep(0.01)
+        finally:
+            user32.UnhookWindowsHookEx(hook)
+
     def start(self) -> bool:
-        if not _HAS_PYNPUT:
+        if _HAS_PYNPUT:
+            target = self._listen
+        elif sys.platform == "win32":
+            target = self._listen_win32
+        else:
             return False
-        self._thread = threading.Thread(target=self._listen, daemon=True)
+        self._hook_ready.clear()
+        self._thread = threading.Thread(target=target, daemon=True)
         self._thread.start()
+        if target is self._listen_win32:
+            self._hook_ready.wait(1.0)
+            return self._hook_ok
         return True
 
     def stop(self) -> None:
         self._stop.set()
 
-    def set_paused(self, paused: bool) -> None:
-        self.paused = bool(paused)
-
     def toggle(self):
-        self.paused = not self.paused
         if self.on_toggle:
             try:
-                self.on_toggle(self.paused)
+                self.on_toggle()
             except Exception:
                 pass
-        return self.paused

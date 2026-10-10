@@ -29,6 +29,19 @@ class WalkCaptureIO:
         self._win = None
         self._vision = None
         self._hwnd = None
+        self._abort = False
+
+    def abort(self) -> None:
+        """观望打断进行中的走路和吸附。"""
+        self._abort = True
+
+    def clear_abort(self) -> None:
+        self._abort = False
+
+    def _aborted(self) -> Dict[str, Any] | None:
+        if not self._abort:
+            return None
+        return {"ok": False, "moved": False, "aborted": True, "gains": 0, "note": "已切回观望，停下操作"}
 
     # ---------------- 依赖与窗口 ----------------
     def _load(self):
@@ -121,6 +134,8 @@ class WalkCaptureIO:
             return False
         re_scan = rescanner or self.io.scan_target
         for _ in range(max_steps):
+            if self._aborted():
+                return False
             yaw = float(target.get("yaw", 0.0))
             if abs(yaw) < YAW_TOLERANCE:
                 return True
@@ -168,6 +183,9 @@ class WalkCaptureIO:
         detours = 0
         last_d = None
         for _ in range(max_steps):
+            stopped = self._aborted()
+            if stopped:
+                return stopped
             t = rescanner()
             if not t.get("ok"):
                 return {"ok": False, "moved": False}
@@ -233,6 +251,9 @@ class WalkCaptureIO:
         vision = self._vload()
         if win is None or win is False:
             return {"ok": False, "visual": False}
+        stopped = self._aborted()
+        if stopped:
+            return stopped
         c = self._center()
         if not c:
             return {"ok": False, "visual": False}
@@ -285,6 +306,49 @@ class WalkCaptureIO:
         return {"ok": True, "kind": kind, "note": note, "remaining": remaining,
                 "dist": float(after.get("dist", t.get("dist", 0))),
                 "visual": vres.get("visual", False)}
+
+    def approach_market(self) -> Dict[str, Any]:
+        """只走到结晶市场站位点，不投掷。人已在牧场时用来重置位置。"""
+        if not self._ensure_ready():
+            return {"ok": False, "note": "未找到游戏窗口，无法走到市场"}
+        stopped = self._aborted()
+        if stopped:
+            return stopped
+        self._lock_mouse()
+        m = self.io.scan_market()
+        if not m.get("ok"):
+            return {"ok": False, "note": m.get("note", "场景中找不到结晶市场")}
+        if m.get("area") != "牧场":
+            return {"ok": False, "area": m.get("area", ""), "note": "当前不在牧场"}
+        if float(m.get("dist", 1e9)) <= 4.0:
+            return {"ok": True, "note": "已在结晶市场前"}
+        wres = self._walk_to_point(4.0, 40, self.io.scan_market, stall_limit=6, final_dist=10.0)
+        if wres.get("ok"):
+            return {"ok": True, "note": "已走到结晶市场前"}
+        return {"ok": False, "note": "未能走到结晶市场"}
+
+    def collect_scanned(self, scanner, label: str) -> Dict[str, Any]:
+        """按指定扫描走向并吸附。scanner 需返回与 scan_target 相同的 yaw/dist。"""
+        if not self._ensure_ready():
+            return {"ok": False, "note": "未找到游戏窗口"}
+        stopped = self._aborted()
+        if stopped:
+            return stopped
+        self._lock_mouse()
+        t = scanner()
+        if not t.get("ok"):
+            return {"ok": False, "note": t.get("note", "附近没有%s" % label)}
+        if not self._turn_toward(t, rescanner=scanner):
+            return {"ok": False, "note": "未能对准%s" % label}
+        wres = self._walk_to_point(VACUUM_RANGE, 24, scanner, stall_limit=4)
+        if not wres.get("ok"):
+            return {"ok": False, "note": "未能靠近%s" % label}
+        vres = self._vacuum()
+        if vres.get("aborted"):
+            return vres
+        if not vres.get("visual"):
+            return {"ok": False, "visual": False, "note": "对着%s吸附后画面没有变化，这次不算收进背包" % label}
+        return {"ok": True, "note": "已吸到%s" % label, "visual": True}
 
     def deposit_to_corral(self, max_steps: int = 30) -> Dict[str, Any]:
         """把真空背包里的史莱姆真实走到最近围栏并投放（快速左键投出）。
@@ -390,9 +454,9 @@ class WalkCaptureIO:
         gains = max(0, after - before) if before >= 0 and after >= 0 else 0
         if gains > 0:
             return {"ok": True, "gains": gains,
-                    "note": f"已真实在结晶市场卖出背包结晶，收入 ${gains}，当前资金 ${after}"}
-        return {"ok": True, "gains": 0,
-                "note": "已走向结晶市场并投出背包结晶（本轮无入账：背包可能为空或未命中投入口）"}
+                    "note": f"已在结晶市场卖出结晶，收入 ${gains}，当前资金 ${after}"}
+        return {"ok": False, "gains": 0,
+                "note": "投进市场后资金没有增加，这次不算卖出"}
 
     def wander_step(self, seconds: float = 1.5) -> Dict[str, Any]:
         """无目标时随机真实走动几秒（漫游），让画面真实移动而非原地/瞬移。"""

@@ -44,7 +44,7 @@ export default function Dashboard(props: PluginSurfaceProps<State>) {
           <KeyValue
             items={[
               { key: t("f.running", { defaultValue: "运行中" }), value: <StatusBadge tone={state?.running ? "success" : "muted"}>{state?.running ? "ON" : "OFF"}</StatusBadge> },
-              { key: t("f.mode", { defaultValue: "模式" }), value: state?.mode === "voice" ? t("m.voice", { defaultValue: "语音指令" }) : t("m.chat", { defaultValue: "聊天/自主" }) },
+              { key: t("f.mode", { defaultValue: "模式" }), value: state?.mode === "ranch" ? t("m.ranch", { defaultValue: "自主经营" }) : t("m.watch", { defaultValue: "观望" }) },
               { key: t("f.phase", { defaultValue: "阶段" }), value: state?.phase ?? "-" },
               { key: t("f.funds", { defaultValue: "资金" }), value: `$${state?.funds ?? 0}` },
               { key: t("f.pid", { defaultValue: "核心PID" }), value: state?.pid != null ? String(state.pid) : "-" },
@@ -62,8 +62,8 @@ export default function Dashboard(props: PluginSurfaceProps<State>) {
           {stop ? <ActionButton action={stop} tone="danger" label={t("btn.stop", { defaultValue: "停止" })} /> : null}
           {setMode ? (
             <Stack direction="row">
-              <ActionButton action={setMode} values={{ mode: "voice" }} label={t("btn.modeVoice", { defaultValue: "切到语音指令" })} />
-              <ActionButton action={setMode} values={{ mode: "chat" }} label={t("btn.modeChat", { defaultValue: "切到聊天/自主" })} />
+              <ActionButton action={setMode} values={{ mode: "ranch" }} label={t("btn.modeRanch", { defaultValue: "切到自主经营" })} />
+              <ActionButton action={setMode} values={{ mode: "watch" }} label={t("btn.modeWatch", { defaultValue: "切到观望" })} />
             </Stack>
           ) : null}
         </Stack>
