@@ -11,7 +11,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "timeout_seconds": 10,
     "default_mode": "watch",
     "game_exe": "",
-    "auto_launch_game": True,
+    "auto_launch_game": False,
     "engine_python": "",
     "backend": "hybrid",  # hybrid=混合(桥接感知+真实键鼠执行,推荐)；ws=桥接；sim=模拟；live=键鼠校准
     # live 校准：money_region={left,top,width,height}(0..1 归一化)、
@@ -55,7 +55,7 @@ class Settings:
     timeout_seconds: int = 10
     default_mode: str = "watch"      # watch 观望 / ranch 自主经营
     game_exe: str = ""
-    auto_launch_game: bool = True
+    auto_launch_game: bool = False
     backend: str = "sim"             # sim | live | ws
     bridge_host: str = "127.0.0.1"   # ws 后端主机
     bridge_port: int = 8124          # ws 后端端口
@@ -87,7 +87,7 @@ class Settings:
         settings.timeout_seconds = max(1, int(cfg.get("timeout_seconds", 10)))
         settings.default_mode = _normalize_mode(cfg.get("default_mode", "watch"))
         settings.game_exe = _resolve_game_exe(str(cfg.get("game_exe", "") or ""))
-        settings.auto_launch_game = bool(cfg.get("auto_launch_game", True))
+        settings.auto_launch_game = bool(cfg.get("auto_launch_game", False))
         settings.backend = cfg.get("backend", "sim")
         settings.bridge_host = cfg.get("bridge_host", "127.0.0.1")
         try:

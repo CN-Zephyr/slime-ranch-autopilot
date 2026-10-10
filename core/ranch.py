@@ -23,6 +23,8 @@ MAX_LEVEL = 2  # 0=未建，1=已建，2=已加那一个升级件
 class RanchState:
     """牧场建设进度知识。"""
     level: Dict[str, int] = field(default_factory=lambda: {"corral": 0, "coop": 0, "garden": 0})
+    # 每种设施已真实拥有的升级件名（来自 mod scan_facilities），用于不重复购买
+    upgrades: Dict[str, List[str]] = field(default_factory=dict)
     known_slimes: List[str] = field(default_factory=list)
     known_areas: List[str] = field(default_factory=list)
     built_flags: List[str] = field(default_factory=list)
@@ -50,17 +52,23 @@ def next_planned(kind: str, state: RanchState) -> dict:
 
 def decide_build_action(state: RanchState, funds: int) -> dict | None:
     """根据资金与已有设施，决策优先建/升级哪个。满足 资金 >= 2*cost 才行动。"""
+    # 食物闭环：已有围栏(有史莱姆要喂)但还没有菜园时，先建菜园产出食物，
+    # 否则投喂永远扫不到食物。其余情况按 corral→coop→garden 补齐。
+    if state.level.get("corral", 0) > 0 and state.level.get("garden", 0) == 0:
+        build_order = ["garden"] + [k for k in FACILITY_ORDER if k != "garden"]
+    else:
+        build_order = list(FACILITY_ORDER)
     # 1) 未建的按优先级先建齐
-    for kind in FACILITY_ORDER:
+    for kind in build_order:
         if state.level.get(kind, 0) == 0:
             cost = facility_cost(kind, 1)
             if funds >= 2 * cost:
                 return {"mode": "build", "kind": kind, "cost": cost}
             return None  # 钱不够就等——不占用别的资源
-    # 2) 都已建，则按优先级升级
+    # 2) 都已建，则按优先级升级（已有升级件的跳过：每种只买一件）
     for kind in FACILITY_ORDER:
         cur = state.level.get(kind, 0)
-        if cur < MAX_LEVEL:
+        if cur < MAX_LEVEL and not state.upgrades.get(kind):
             cost = facility_cost(kind, cur + 1)
             if funds >= 2 * cost:
                 return {"mode": "upgrade", "kind": kind, "cost": cost}

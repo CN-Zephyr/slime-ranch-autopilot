@@ -90,6 +90,12 @@ public class SimpleJson
 public class SlimeBridgeServer
 {
     public const int DefaultPort = 8124;
+    // mod 版本与能力清单：NEKO 插件通过 /api/health 做能力握手，
+    // 旧版 mod 缺少新动作时插件应提示更新而不是静默失败。
+    public const string ModVersion = "0.4.0";
+    public const string ModFeatures =
+        "[\"status\",\"action\",\"scan_target\",\"scan_corral\",\"scan_market\",\"scan_food\"," +
+        "\"scan_plort\",\"scan_plot\",\"scan_facilities\",\"ui_buttons\",\"debug_ui\",\"set_overlay\"]";
     private readonly HttpListener _listener;
     private Thread _thread;
     private volatile bool _running;
@@ -140,7 +146,9 @@ public class SlimeBridgeServer
 
         if (path == "/api/health")
         {
-            body = Encoding.UTF8.GetBytes("{\"ok\":true,\"name\":\"slime_bridge\"}");
+            body = Encoding.UTF8.GetBytes(
+                "{\"ok\":true,\"name\":\"slime_bridge\",\"version\":\"" + ModVersion +
+                "\",\"features\":" + ModFeatures + "}");
         }
         else if (path == "/api/status")
         {
@@ -206,6 +214,7 @@ public class SlimeBridgeServer
                ",\"cz\":" + ar.cz.ToString(CultureInfo.InvariantCulture) +
                ",\"cyaw\":" + ar.cyaw.ToString(CultureInfo.InvariantCulture) +
                ",\"area\":" + SimpleJson.Esc(ar.area ?? "") +
-               ",\"note\":" + SimpleJson.Esc(ar.note ?? "") + "}";
+               ",\"note\":" + SimpleJson.Esc(ar.note ?? "") +
+               ",\"payload\":" + SimpleJson.Esc(ar.payload ?? "") + "}";
     }
 }

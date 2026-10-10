@@ -40,6 +40,7 @@ namespace SlimeBridge
         public float px, py;             // 玩家世界坐标(供 core 漫游/校验)
         public float tx, tz;             // 目标世界坐标
         public float cx, cz, cyaw;       // 结晶市场中心坐标 + 朝向中心偏角（scan_market 用：投掷目标）
+        public string payload = "";      // 列表类结果（scan_facilities / ui_buttons / scan_plot 的附加信息）的 JSON 字符串
     }
 
     public interface IGameFacade
@@ -540,6 +541,11 @@ namespace SlimeBridge
                             case "scan_market": ScanMarketReal(ar); break;
                             case "scan_food": ScanFoodReal(ar); break;
                             case "scan_plort": ScanPlortReal(ar); break;
+                            case "scan_plot": ScanPlotReal(kind, ar); break;
+                            case "scan_facilities": ScanFacilitiesReal(ar); break;
+                            case "ui_buttons": UiButtonsReal(ar); break;
+                            case "ui_hover": UiHoverReal(ar); break;
+                            case "debug_ui": DebugUiReal(ar); break;
                             case "tp_market": TeleportMarketReal(ar); break;
                             case "debug_market": DebugMarketReal(ar); break;
                             case "probe": ProbeNearReal(ar, kind); break;
@@ -1017,6 +1023,365 @@ namespace SlimeBridge
             catch (Exception e) { ar.ok = false; ar.note = "扫描围栏异常: " + e.Message; }
         }
 
+        // ---- 地块定位（真实：纯只读）----
+        // kind: corral|coop|garden|empty。empty=空置地块（真实建造要走到它面前开购买页）。
+        // 返回与 scan_corral 同构的 yaw/dist/tx/tz/px/py，core 直接拿去做转向/走位反馈；
+        // payload 额外带 isEmpty 与已拥有升级列表，供 core 决定"建"还是"升级"、以及购买后验证。
+        private void ScanPlotReal(string kind, ActionResult ar)
+        {
+            EnsureScene();
+            if (_player == null) { ar.ok = false; ar.note = "未进入存档"; return; }
+            try
+            {
+                bool wantEmpty = kind == "empty";
+                LandPlot.Id want = KindToPlotId(kind);
+                Vector3 p = _player.transform.position;
+                LandPlot best = null;
+                float bestD = float.MaxValue;
+                bool bestEmpty = false;
+                string bestUpgrades = "[]";
+                foreach (var lp in UnityEngine.Object.FindObjectsOfType<LandPlot>())
+                {
+                    if (lp == null) continue;
+                    LandPlotModel m = PlotModelOf(lp);
+                    if (m == null) continue;
+                    bool isEmpty = (m.typeId == LandPlot.Id.NONE || m.typeId == LandPlot.Id.EMPTY);
+                    if (wantEmpty) { if (!isEmpty) continue; }
+                    else if (isEmpty || m.typeId != want) continue;
+                    float d = Vector3.Distance(p, lp.transform.position);
+                    if (d < bestD)
+                    {
+                        bestD = d; best = lp; bestEmpty = isEmpty; bestUpgrades = UpgradesJson(lp);
+                    }
+                }
+                if (best == null)
+                {
+                    ar.ok = false;
+                    ar.note = wantEmpty ? "场景中没有空置地块" : ("场景中没有 " + kind + " 地块");
+                    return;
+                }
+                Vector3 t = best.transform.position;
+                // 交互终端桩在地块边缘（"按E启动"那根柱子），不在地块中心：
+                // 找名字像终端的子节点，把走位/朝向目标改成它，E 的触发范围才够得着。
+                Vector3 aim = t;
+                string termName = "";
+                try
+                {
+                    string[] keys = { "Terminal", "Activator", "Console", "Switch", "Button" };
+                    foreach (var tr in best.GetComponentsInChildren<Transform>(true))
+                    {
+                        if (tr == null || string.IsNullOrEmpty(tr.name)) continue;
+                        bool hitName = false;
+                        foreach (string k in keys)
+                        {
+                            if (tr.name.IndexOf(k, StringComparison.OrdinalIgnoreCase) >= 0) { hitName = true; break; }
+                        }
+                        if (!hitName) continue;
+                        aim = tr.position;
+                        termName = tr.name;
+                        break;
+                    }
+                }
+                catch (Exception) { }
+                FillAim(ar, aim, wantEmpty ? "empty" : kind, Vector3.Distance(p, aim),
+                        "已定位地块 kind=" + (wantEmpty ? "empty" : kind)
+                        + " dist=" + bestD.ToString("F1") + "m"
+                        + (termName != "" ? " terminal=" + termName : ""));
+                ar.payload = "{\"isEmpty\":" + (bestEmpty ? "true" : "false")
+                             + ",\"upgrades\":" + bestUpgrades
+                             + ",\"terminal\":" + SimpleJson.Esc(termName)
+                             + ",\"tx2\":" + aim.x.ToString("F2", CultureInfo.InvariantCulture)
+                             + ",\"tz2\":" + aim.z.ToString("F2", CultureInfo.InvariantCulture) + "}";
+            }
+            catch (Exception e) { ar.ok = false; ar.note = "扫描地块异常: " + e.Message; }
+        }
+
+        // ---- 全设施清单（真实：纯只读）----
+        // payload = [{kind, isEmpty, x, z, upgrades:[...]}]。core 用它同步建设进度、
+        // 以及作为"真实购买是否生效"的验证依据（升级列表/地块类型变化）。
+        private void ScanFacilitiesReal(ActionResult ar)
+        {
+            EnsureScene();
+            if (_player == null) { ar.ok = false; ar.note = "未进入存档"; return; }
+            var sb = new System.Text.StringBuilder();
+            sb.Append('[');
+            int n = 0;
+            try
+            {
+                foreach (var lp in UnityEngine.Object.FindObjectsOfType<LandPlot>())
+                {
+                    if (lp == null) continue;
+                    LandPlotModel m = PlotModelOf(lp);
+                    if (m == null) continue;
+                    bool isEmpty = (m.typeId == LandPlot.Id.NONE || m.typeId == LandPlot.Id.EMPTY);
+                    string kind;
+                    if (isEmpty) kind = "empty";
+                    else if (m.typeId == LandPlot.Id.COOP) kind = "coop";
+                    else if (m.typeId == LandPlot.Id.GARDEN) kind = "garden";
+                    else if (m.typeId == LandPlot.Id.CORRAL) kind = "corral";
+                    else kind = m.typeId.ToString();
+                    if (n > 0) sb.Append(',');
+                    n++;
+                    sb.Append("{\"kind\":\"").Append(kind).Append('"')
+                      .Append(",\"isEmpty\":").Append(isEmpty ? "true" : "false")
+                      .Append(",\"x\":").Append(lp.transform.position.x.ToString("F2", CultureInfo.InvariantCulture))
+                      .Append(",\"z\":").Append(lp.transform.position.z.ToString("F2", CultureInfo.InvariantCulture))
+                      .Append(",\"upgrades\":").Append(UpgradesJson(lp))
+                      .Append('}');
+                }
+            }
+            catch (Exception e) { ar.ok = false; ar.note = "扫描设施异常: " + e.Message; return; }
+            sb.Append(']');
+            ar.ok = true;
+            ar.count = n;
+            ar.payload = sb.ToString();
+            ar.note = "已扫描 " + n + " 个地块";
+        }
+
+        // 地块已拥有的升级名列表（JSON 数组字符串）。LandPlotModel.upgrades 非公开，反射读取。
+        private static string UpgradesJson(LandPlot plot)
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.Append('[');
+            try
+            {
+                LandPlotModel m = PlotModelOf(plot);
+                if (m != null)
+                {
+                    FieldInfo f = FindField(m.GetType(), "upgrades");
+                    var en = f != null ? f.GetValue(m) as System.Collections.IEnumerable : null;
+                    if (en != null)
+                    {
+                        bool first = true;
+                        foreach (object o in en)
+                        {
+                            if (o == null) continue;
+                            if (!first) sb.Append(',');
+                            first = false;
+                            sb.Append('"').Append(o.ToString()).Append('"');
+                        }
+                    }
+                }
+            }
+            catch (Exception) { }
+            sb.Append(']');
+            return sb.ToString();
+        }
+
+        // ---- 可见 UI 按钮（真实：纯只读）----
+        // SR1 的购买/升级菜单是 uGUI：靠近地块时才出现。这里把当前**可见且可点**的按钮
+        // 的文字与屏幕坐标（左下原点，游戏渲染分辨率像素）报给 core，由 core 用真实鼠标点击，
+        // 从而走游戏原生购买链路（开页面→点按钮→真扣钱真建造/升级）。
+        // payload = {"screen_w":W,"screen_h":H,"buttons":[{label,sx,sy},...]}；
+        // core 用窗口客户区尺寸 / screen_w|h 换算绝对屏幕坐标（兼容 DPI 缩放）。
+        private void UiButtonsReal(ActionResult ar)
+        {
+            var sb = new System.Text.StringBuilder();
+            var textsSb = new System.Text.StringBuilder();
+            int n = 0;
+            int sw = 0, sh = 0;
+            Canvas menuCanvas = null;
+            try
+            {
+                var cam = Camera.main;
+                sw = Screen.width;
+                sh = Screen.height;
+                if (cam != null)
+                {
+                    foreach (var btn in UnityEngine.Object.FindObjectsOfType<UnityEngine.UI.Button>())
+                    {
+                        if (btn == null || btn.gameObject == null || !btn.gameObject.activeInHierarchy || !btn.interactable) continue;
+                        var rt = btn.GetComponent<RectTransform>();
+                        if (rt == null) continue;
+                        string label = LabelOf(btn);
+                        // 屏幕坐标按 Canvas 渲染模式分别换算：
+                        //  ScreenSpaceOverlay 的 RectTransform 位置本身就是"屏幕中心原点"的像素，
+                        //  用主相机 WorldToScreenPoint 投影会得到屏幕外的垃圾值（实测 2791,4186）；
+                        //  WorldSpace / ScreenSpaceCamera 才走相机投影。
+                        var canvas = btn.GetComponentInParent<Canvas>();
+                        Vector3 sp;
+                        if (canvas != null && canvas.renderMode == RenderMode.ScreenSpaceOverlay)
+                        {
+                            // Overlay 画布下 UI 元素的 world 位置**就是**屏幕坐标(左下原点、渲染像素)，
+                            // 不能再加屏幕中心偏移（加了会整体飞出屏幕外）。
+                            sp = rt.position;
+                        }
+                        else
+                        {
+                            var uiCam = (canvas != null && canvas.renderMode == RenderMode.ScreenSpaceCamera && canvas.worldCamera != null)
+                                ? canvas.worldCamera : cam;
+                            sp = (Vector3)RectTransformUtility.WorldToScreenPoint(uiCam, rt.position);
+                        }
+                        if (menuCanvas == null && btn.name.IndexOf("Purchase", StringComparison.Ordinal) >= 0)
+                            menuCanvas = canvas;
+                        if (n > 0) sb.Append(',');
+                        n++;
+                        sb.Append("{\"label\":").Append(SimpleJson.Esc(label))
+                          .Append(",\"name\":").Append(SimpleJson.Esc(btn.name))
+                          .Append(",\"parent\":").Append(SimpleJson.Esc(btn.transform.parent != null ? btn.transform.parent.name : ""))
+                          .Append(",\"sx\":").Append(sp.x.ToString("F1", CultureInfo.InvariantCulture))
+                          .Append(",\"sy\":").Append(sp.y.ToString("F1", CultureInfo.InvariantCulture))
+                          .Append(",\"w\":").Append(rt.rect.width.ToString("F1", CultureInfo.InvariantCulture))
+                          .Append(",\"h\":").Append(rt.rect.height.ToString("F1", CultureInfo.InvariantCulture))
+                          .Append('}');
+                        if (n >= 40) break;   // 封顶：菜单按钮不会更多，防异常场景撑爆协议
+                    }
+                }
+                // 菜单当前展示的升级/购买项文字（TMP），供 core 记录与核对"点的是哪个升级"
+                if (menuCanvas != null)
+                {
+                    int tn = 0;
+                    foreach (var c in menuCanvas.GetComponentsInChildren<Component>(true))
+                    {
+                        if (c == null || c.gameObject == null || !c.gameObject.activeInHierarchy) continue;
+                        if (c.GetType().Name.IndexOf("TextMeshPro", StringComparison.Ordinal) < 0) continue;
+                        var prop = c.GetType().GetProperty("text");
+                        var txt = prop != null ? prop.GetValue(c, null) as string : null;
+                        if (string.IsNullOrEmpty(txt)) continue;
+                        if (tn > 0) textsSb.Append(',');
+                        tn++;
+                        textsSb.Append("{\"obj\":").Append(SimpleJson.Esc(c.gameObject.name))
+                               .Append(",\"text\":").Append(SimpleJson.Esc(txt.Replace("\n", " ")))
+                               .Append('}');
+                        if (tn >= 12) break;
+                    }
+                }
+            }
+            catch (Exception e) { ar.ok = false; ar.note = "扫描UI按钮异常: " + e.Message; return; }
+            ar.ok = true;
+            ar.count = n;
+            ar.payload = "{\"screen_w\":" + sw.ToString(CultureInfo.InvariantCulture)
+                         + ",\"screen_h\":" + sh.ToString(CultureInfo.InvariantCulture)
+                         + ",\"buttons\":[" + sb + "]"
+                         + ",\"menu_texts\":[" + textsSb + "]}";
+            ar.note = "已扫描 " + n + " 个可见按钮（渲染分辨率 " + sw + "x" + sh + "）";
+        }
+
+        // ---- 光标悬停探测（真实：纯只读）----
+        // 对**当前 OS 光标位置**做 uGUI 射线检测，返回命中控件名。core 先把真实鼠标移到
+        // 候选点、用本动作确认"确实悬在目标按钮上"再按下——任何 DPI 缩放/画布模式/原点
+        // 差异都被这个闭环吸收，点击仍是真实 SendInput 鼠标事件。
+        private void UiHoverReal(ActionResult ar)
+        {
+            try
+            {
+                var es = UnityEngine.EventSystems.EventSystem.current;
+                if (es == null) { ar.ok = false; ar.note = "EventSystem 不可用（菜单未打开？）"; return; }
+                var ped = new UnityEngine.EventSystems.PointerEventData(es);
+                ped.position = Input.mousePosition;
+                var hits = new System.Collections.Generic.List<UnityEngine.EventSystems.RaycastResult>();
+                es.RaycastAll(ped, hits);
+                // 取首个命中点沿父链向上的名字：射线通常先打到按钮的子 Image/Text，
+                // 父链里才出现 Button 所在的 GameObject 名，core 靠这个确认"悬在目标上"。
+                var chain = new System.Text.StringBuilder();
+                int cn = 0;
+                if (hits.Count > 0 && hits[0].gameObject != null)
+                {
+                    var go = hits[0].gameObject;
+                    while (go != null && cn < 5)
+                    {
+                        if (cn > 0) chain.Append(',');
+                        chain.Append(SimpleJson.Esc(go.name));
+                        cn++;
+                        go = go.transform.parent != null ? go.transform.parent.gameObject : null;
+                    }
+                }
+                var sb = new System.Text.StringBuilder();
+                sb.Append("{\"mx\":").Append(Input.mousePosition.x.ToString("F0", CultureInfo.InvariantCulture))
+                  .Append(",\"my\":").Append(Input.mousePosition.y.ToString("F0", CultureInfo.InvariantCulture))
+                  .Append(",\"n\":").Append(hits.Count)
+                  .Append(",\"chain\":[").Append(chain).Append("]}");
+                ar.ok = true;
+                ar.payload = sb.ToString();
+                ar.note = hits.Count > 0 && hits[0].gameObject != null
+                    ? ("悬停命中: " + hits[0].gameObject.name) : "光标下没有可命中控件";
+            }
+            catch (Exception e) { ar.ok = false; ar.note = "悬停探测异常: " + e.Message; }
+        }
+
+        // 按钮文字多源提取：uGUI Text / TextMesh / TextMeshPro(反射，免编译期引用)。
+        // SR1 不同菜单的文字载体不一样，只认 uGUI Text 会拿到空标签。
+        private static string LabelOf(UnityEngine.UI.Button btn)
+        {
+            var parts = new List<string>();
+            try
+            {
+                foreach (var t in btn.GetComponentsInChildren<UnityEngine.UI.Text>(true))
+                    if (t != null && !string.IsNullOrEmpty(t.text)) parts.Add(t.text);
+            }
+            catch (Exception) { }
+            try
+            {
+                foreach (var tm in btn.GetComponentsInChildren<TextMesh>(true))
+                    if (tm != null && !string.IsNullOrEmpty(tm.text)) parts.Add(tm.text);
+            }
+            catch (Exception) { }
+            try
+            {
+                foreach (var c in btn.GetComponentsInChildren<Component>(true))
+                {
+                    if (c == null) continue;
+                    if (c.GetType().Name.IndexOf("TextMeshPro", StringComparison.Ordinal) < 0) continue;
+                    var prop = c.GetType().GetProperty("text");
+                    var v = prop != null ? prop.GetValue(c, null) as string : null;
+                    if (!string.IsNullOrEmpty(v)) parts.Add(v);
+                }
+            }
+            catch (Exception) { }
+            return string.Join(" ", parts.ToArray());
+        }
+
+        // ---- UI 内省（诊断：菜单到底长什么样）----
+        // 列出所有活跃 Canvas、所有活跃 Button(名字/父节点/屏幕坐标/文字)、以及所有活跃
+        // 文字组件(uGUI Text / TextMesh / TMP) 的内容。用于确定升级/购买菜单的实现方式与
+        // 按钮文字载体，从而决定 core 的点击与关键词匹配策略。
+        private void DebugUiReal(ActionResult ar)
+        {
+            var sb = new System.Text.StringBuilder();
+            try
+            {
+                foreach (var cv in UnityEngine.Object.FindObjectsOfType<Canvas>())
+                {
+                    if (cv == null || cv.gameObject == null || !cv.gameObject.activeInHierarchy) continue;
+                    sb.Append("CANVAS name='").Append(cv.name)
+                      .Append("' mode=").Append(cv.renderMode)
+                      .Append(" order=").Append(cv.sortingOrder).Append("\n");
+                }
+                foreach (var btn in UnityEngine.Object.FindObjectsOfType<UnityEngine.UI.Button>())
+                {
+                    if (btn == null || btn.gameObject == null || !btn.gameObject.activeInHierarchy) continue;
+                    var rt = btn.GetComponent<RectTransform>();
+                    var cam = Camera.main;
+                    Vector3 sp = (rt != null && cam != null)
+                        ? (Vector3)RectTransformUtility.WorldToScreenPoint(cam, rt.position) : Vector3.zero;
+                    sb.Append("BTN name='").Append(btn.name)
+                      .Append("' parent='").Append(btn.transform.parent != null ? btn.transform.parent.name : "")
+                      .Append("' interactable=").Append(btn.interactable)
+                      .Append(" screen=").Append(sp.ToString("F0"))
+                      .Append(" label='").Append(LabelOf(btn)).Append("'\n");
+                }
+                int tn = 0;
+                foreach (var c in UnityEngine.Object.FindObjectsOfType<Component>())
+                {
+                    if (c == null || c.gameObject == null || !c.gameObject.activeInHierarchy) continue;
+                    string tname = c.GetType().Name;
+                    bool isText = tname == "Text" || tname == "TextMesh"
+                                  || tname.IndexOf("TextMeshPro", StringComparison.Ordinal) >= 0;
+                    if (!isText) continue;
+                    string txt = "";
+                    var prop = c.GetType().GetProperty("text");
+                    if (prop != null) txt = prop.GetValue(c, null) as string ?? "";
+                    if (string.IsNullOrEmpty(txt)) continue;
+                    if (++tn > 40) { sb.Append("TXT ...truncated\n"); break; }
+                    sb.Append("TXT [").Append(tname).Append("] obj='").Append(c.gameObject.name)
+                      .Append("' text='").Append(txt.Replace("\n", " ")).Append("'\n");
+                }
+            }
+            catch (Exception e) { ar.ok = false; ar.note = "debug_ui 异常: " + e.Message; return; }
+            ar.ok = true;
+            ar.note = sb.ToString();
+        }
+
         // ---- 结晶市场定位（真实：纯只读，供 core 真实走到市场投出结晶换钱）----
         // 结晶市场是牧场里的固定建筑：玩家把真空背包里的结晶对准投入口投出，立即换成钱。
         // 市场位置不变，扫描一次后缓存（_cachedMarket），之后每步 scan_market 只用缓存的
@@ -1085,6 +1450,7 @@ namespace SlimeBridge
                 if (_cachedMarket == null) { ar.ok = false; ar.note = "场景中找不到结晶市场"; return; }
                 Vector3 p = _player.transform.position;
                 Vector3 forward = _player.transform.forward;
+                var cam = Camera.main;
                 ar.px = p.x; ar.py = p.z;
                 Vector3 flatF = forward; flatF.y = 0f;
                 // 站位点：投入口开孔 + 朝庭院方向 * 14m（站在庭院里面对开孔，可把结晶投进去）
@@ -1106,6 +1472,26 @@ namespace SlimeBridge
                 ar.yawDelta = standYaw;
                 ar.cyaw = portYaw;
                 ar.area = ZoneToName(CurrentZone());
+                // 俯仰角差（度，正=需要抬头）：相机 forward 与"指向投入口"方向的垂直夹角，
+                // 供 core 像收敛 yaw 一样闭环收敛 pitch 后再投掷（盲猜俯仰是卖不进的根因）。
+                float pitchDelta = 0f;
+                try
+                {
+                    var camT = cam != null ? cam.transform : null;
+                    if (camT != null)
+                    {
+                        Vector3 toPort3 = port - p;
+                        float flatLen = new Vector3(toPort3.x, 0f, toPort3.z).magnitude;
+                        if (flatLen > 0.001f && toPort3.magnitude > 0.001f)
+                        {
+                            float desired = Mathf.Atan2(toPort3.y, flatLen) * Mathf.Rad2Deg;
+                            float current = Mathf.Asin(Mathf.Clamp(camT.forward.y, -1f, 1f)) * Mathf.Rad2Deg;
+                            pitchDelta = desired - current;
+                        }
+                    }
+                }
+                catch (Exception) { pitchDelta = 0f; }
+                ar.payload = "{\"pitch_delta\":" + pitchDelta.ToString("F2", CultureInfo.InvariantCulture) + "}";
                 ar.ok = true;
                 ar.note = "已定位结晶市场投入口 站位=" + standDist.ToString("F1") + "m yaw=" + standYaw.ToString("F1") + "° 区域=" + ar.area;
             }

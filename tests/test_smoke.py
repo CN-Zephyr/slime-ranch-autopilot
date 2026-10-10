@@ -55,13 +55,23 @@ class RanchLogicTests(unittest.TestCase):
         self.assertEqual(facility_cost("corral", 1), 225)
         self.assertEqual(facility_cost("coop", 2), 650)
 
-    def test_priorities_corral_then_coop_then_garden(self):
+    def test_priorities_corral_then_garden_for_food_then_coop(self):
         st = RanchState()
         self.assertEqual(decide_build_action(st, 450)["kind"], "corral")
         st.level["corral"] = 1
+        # 有围栏(有史莱姆要喂)但没菜园：食物闭环优先建菜园
+        self.assertEqual(decide_build_action(st, 800)["kind"], "garden")
+        st.level["garden"] = 1
         self.assertEqual(decide_build_action(st, 800)["kind"], "coop")
         st.level["coop"] = 1
-        self.assertEqual(decide_build_action(st, 600)["kind"], "garden")
+        # 都建齐后进入升级阶段（每种只买一件升级）
+        act = decide_build_action(st, 10000)
+        self.assertEqual(act["mode"], "upgrade")
+        self.assertEqual(act["kind"], "corral")
+        st.upgrades["corral"] = ["NETTING"]
+        st.level["corral"] = 2
+        act = decide_build_action(st, 10000)
+        self.assertEqual(act["kind"], "coop")
 
 
 class SimTests(unittest.TestCase):

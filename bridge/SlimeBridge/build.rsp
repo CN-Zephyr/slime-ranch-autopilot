@@ -1,6 +1,7 @@
 /nologo
 /target:library
-/out:E:\neko插件\slime_ranch_autopilot\bridge\SlimeBridge\bin\Release\SlimeBridge.dll
+/optimize+
+/out:E:\DeCode\Coding\0NEKO-slime-ranch-autopilot\slime-ranch-autopilot\bridge\SlimeBridge\bin\Release\SlimeBridge.dll
 /reference:"E:\SteamLibrary\steamapps\common\Slime Rancher\SlimeRancher_Data\Managed\Assembly-CSharp.dll"
 /reference:"E:\SteamLibrary\steamapps\common\Slime Rancher\SlimeRancher_Data\Managed\UnityEngine.dll"
 /reference:"E:\SteamLibrary\steamapps\common\Slime Rancher\SlimeRancher_Data\Managed\UnityEngine.CoreModule.dll"
@@ -9,12 +10,13 @@
 /reference:"E:\SteamLibrary\steamapps\common\Slime Rancher\SlimeRancher_Data\Managed\UnityEngine.UI.dll"
 /reference:"E:\SteamLibrary\steamapps\common\Slime Rancher\SlimeRancher_Data\Managed\UnityEngine.TextRenderingModule.dll"
 /reference:"E:\SteamLibrary\steamapps\common\Slime Rancher\SlimeRancher_Data\Managed\UnityEngine.UIModule.dll"
+/reference:"E:\SteamLibrary\steamapps\common\Slime Rancher\SlimeRancher_Data\Managed\UnityEngine.InputLegacyModule.dll"
 /reference:"E:\SteamLibrary\steamapps\common\Slime Rancher\SlimeRancher_Data\Managed\UnityEngine.IMGUIModule.dll"
 /reference:"E:\SteamLibrary\steamapps\common\Slime Rancher\SlimeRancher_Data\Managed\UnityEngine.PhysicsModule.dll"
 /reference:"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\System.dll"
 /reference:"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\System.Core.dll"
 /reference:"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\System.Net.dll"
 /reference:"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\mscorlib.dll"
-E:\neko插件\slime_ranch_autopilot\bridge\SlimeBridge\GameState.cs
-E:\neko插件\slime_ranch_autopilot\bridge\SlimeBridge\HttpServer.cs
-E:\neko插件\slime_ranch_autopilot\bridge\SlimeBridge\Plugin.cs
+E:\DeCode\Coding\0NEKO-slime-ranch-autopilot\slime-ranch-autopilot\bridge\SlimeBridge\GameState.cs
+E:\DeCode\Coding\0NEKO-slime-ranch-autopilot\slime-ranch-autopilot\bridge\SlimeBridge\HttpServer.cs
+E:\DeCode\Coding\0NEKO-slime-ranch-autopilot\slime-ranch-autopilot\bridge\SlimeBridge\Plugin.cs

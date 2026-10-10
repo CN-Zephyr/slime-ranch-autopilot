@@ -23,8 +23,24 @@ from core.game import IOController, LiveIOController, run_manual_command  # noqa
 from core.sim import SimController  # noqa: E402
 from core.bridge import BridgeIOController  # noqa: E402
 from core.real import WalkCaptureIO  # noqa: E402
-from core.ranch import RanchState, decide_build_action, FACILITY_NAMES, record_built, MAX_LEVEL  # noqa: E402
+from core.ranch import RanchState, decide_build_action, FACILITY_NAMES, record_built  # noqa: E402
 from core.voice import HotkeyListener  # noqa: E402
+
+# 真实购买菜单的按钮关键词（中英双语：SR1 界面文字跟游戏语言走）。
+# 建造菜单(空地块购买页)三个按钮文字大致为 Corral/Coop/Garden 或 围栏/鸡舍/菜园。
+BUILD_KEYWORDS = {
+    "corral": ["Corral", "围栏", "牧场"],
+    "coop": ["Coop", "鸡舍", "鸡圈"],
+    "garden": ["Garden", "菜园", "花园"],
+}
+# 升级菜单按钮文字是升级件名（围网/水槽/气网/结晶收集器/喂食器/喷灌…），
+# 但 SR1 的升级页只有一个"购买"按钮(PurchaseButton)买当前展示项，故关键词以它为主。
+UPGRADE_KEYWORDS = [
+    "购买", "Purchase",
+    "Netting", "Water Tank", "Air Net", "Plort Collector",
+    "Feeder", "Water Trough", "Sprinkler", "Upgrade",
+    "升级", "围网", "水槽", "水缸", "气网", "结晶收集", "喂食", "喷灌", "喷洒",
+]
 
 
 class Brain:
@@ -38,6 +54,7 @@ class Brain:
         self._reset_fails = 0
         self._said: dict[str, tuple[str, int]] = {}
         self._overlay_last = ""
+        self._sell_pending = False   # 背包里还有没卖掉的结晶（上轮售卖失败）
         self._hotkey = HotkeyListener(on_toggle=self._on_hotkey)
         # 后端选择
         if settings.backend == "live" and os.path.exists(settings.game_exe):
@@ -45,6 +62,7 @@ class Brain:
                 settings.game_exe,
                 calibration=getattr(settings, "calibration", None),
                 fallback_funds=getattr(settings, "live_fallback_funds", -1),
+                auto_launch=getattr(settings, "auto_launch_game", False),
             )
             self.io.set_logger(self.c.logger)
             self.walk = None
@@ -56,7 +74,7 @@ class Brain:
                 port=getattr(settings, "bridge_port", 8124),
                 fallback_funds=getattr(settings, "live_fallback_funds", -1),
                 game_exe=getattr(settings, "game_exe", ""),
-                auto_launch=getattr(settings, "auto_launch_game", True),
+                auto_launch=getattr(settings, "auto_launch_game", False),
             )
             self.io = bridge
             # hybrid：仅在执行层叠加真实键鼠（转向/走路/吸附），感知仍走桥接
@@ -149,11 +167,36 @@ class Brain:
         why = "走不到市场，改为传送。" if on_ranch else ""
         self._teleport_market(why)
 
+    def _maybe_dismiss_blocking_menu(self) -> None:
+        """输入吞噬面板看门狗。
+
+        SR1 失焦会自动暂停并驻留暂停菜单（NEKO 桌面窗抢焦点就会触发），暂停时吞掉
+        全部移动/视角输入，抢回焦点也不会自动恢复。特征：有 Resume/Close/Back/Cancel
+        类按钮且**没有** PurchaseButton（有购买按钮的是正常地块菜单，绝不能关）。
+        命中则 hover 自校准点它恢复游戏。
+        """
+        if not self.walk:
+            return
+        try:
+            ui = self.io.ui_buttons()
+        except Exception:
+            return
+        names = [str(b.get("name", "")) for b in ui.get("buttons", [])]
+        if not names or any("Purchase" in n for n in names):
+            return
+        target = next((n for n in names
+                       if n in ("ResumeButton", "CloseButton", "BackButton", "CancelButton")), "")
+        if not target:
+            return
+        if self.walk.click_button_named(target):
+            self.c.say(f"【自主】检测到吞输入的面板(暂停/设置)，已点 {target} 恢复")
+
     def _ranch_tick(self) -> None:
         """牧场循环：重置位置，收食物并投喂，收结晶卖掉，钱够再建造。"""
         self.ticks += 1
         if self.mode != "ranch":
             return
+        self._maybe_dismiss_blocking_menu()
         if not self._market_ready:
             self._reset_to_market()
             return
@@ -175,12 +218,25 @@ class Brain:
             if plort.get("aborted") or self.mode != "ranch":
                 return
             if plort.get("ok"):
+                self._sell_pending = True
                 self._say("plort", f"【自主】{plort.get('note')}", every=2)
                 sold = self.walk.sell_plorts()
                 if sold.get("aborted"):
                     return
+                if sold.get("ok"):
+                    self._sell_pending = False
                 every = 2 if sold.get("ok") else 3
                 self._say("sell", f"【自主】{sold.get('note', '')}", every=every)
+            elif getattr(self, "_sell_pending", False):
+                # 背包里还有上轮没卖掉的结晶：地上扫不到新结晶也再去卖一次
+                sold = self.walk.sell_plorts()
+                if sold.get("aborted"):
+                    return
+                if sold.get("ok"):
+                    self._sell_pending = False
+                    self._say("sell", f"【自主】{sold.get('note', '')}", every=2)
+                else:
+                    self._say("sell-pending", f"【自主】背包结晶还没卖掉：{sold.get('note', '')}", every=6)
             else:
                 self._say("no-plort", f"【自主】{plort.get('note', '附近没有结晶')}", every=4)
         else:
@@ -191,29 +247,71 @@ class Brain:
         if self.mode == "ranch":
             self._infra_step()
 
-    # ------------------------------------------------------------ 需求1 建造/升级
+    # ------------------------------------------------------------ 需求1 建造/升级（真实 UI 购买）
+    def _facilities_signature(self):
+        """设施快照（供真实购买前后对比验证）：(kind, 是否空地块, 已拥有升级) 的排序元组。"""
+        try:
+            fac = self.io.scan_facilities()
+        except Exception:
+            fac = []
+        return tuple(sorted(
+            (str(f.get("kind", "")), bool(f.get("isEmpty")),
+             tuple(str(u) for u in (f.get("upgrades") or ())))
+            for f in fac if isinstance(f, dict)
+        ))
+
+    def _sync_ranch_from_facilities(self) -> None:
+        """把建设进度与游戏真实设施对齐（含玩家手动建/升的部分）。"""
+        try:
+            fac = self.io.scan_facilities()
+        except Exception:
+            return
+        for f in fac:
+            if not isinstance(f, dict):
+                continue
+            kind = f.get("kind")
+            if kind not in FACILITY_NAMES or f.get("isEmpty"):
+                continue
+            ups = [str(u) for u in (f.get("upgrades") or [])]
+            self.ranch.level[kind] = 2 if ups else 1
+            self.ranch.upgrades[kind] = ups
+
     def _infra_step(self) -> None:
+        """建造/升级：走到对应地块→打开菜单→真实点击购买→用设施快照验证生效。
+
+        不再调用 mod 的 build/upgrade 魔法（那条路只扣钱、画面里没有真购买）。
+        """
+        if not self.walk:
+            return  # 纯桥接/模拟模式没有真实键鼠执行层，不做购买
+        if not getattr(self.io, "supports", None) or not self.io.supports("ui_buttons"):
+            # 能力握手失败：游戏里的 mod 是旧版（没有 ui_buttons 等真实 UI 感知动作）。
+            # 宁可明确提示更新 mod，也不回退到"只扣钱不真买"的魔法路径。
+            self._say("infra-mod-old",
+                      "【自主】游戏内 SlimeBridge mod 版本过旧（缺少真实 UI 购买能力），"
+                      "请完全退出游戏后更新 Mods\\SlimeBridge.dll 再进存档", every=12)
+            return
         funds = self.io.read_money()
+        self._sync_ranch_from_facilities()
         action = decide_build_action(self.ranch, funds)
         if not action:
             return
         kind = action["kind"]
         mode = action["mode"]  # "build" 或 "upgrade"
-        res = self.io.build(kind) if mode == "build" else self.io.upgrade(kind)
+        keywords = BUILD_KEYWORDS.get(kind, []) if mode == "build" else UPGRADE_KEYWORDS
+        res = self.walk.real_purchase(kind, mode, keywords, self._facilities_signature)
         if res.get("ok"):
-            new_level = self.ranch.level.get(kind, 0) + 1
-            self.ranch.level[kind] = new_level
+            self._sync_ranch_from_facilities()
+            new_level = self.ranch.level.get(kind, 0)
             record_built(self.ranch, kind)
             name = FACILITY_NAMES.get(kind, kind)
             verb = "建造了" if mode == "build" else "升级了"
+            ups = self.ranch.upgrades.get(kind) or []
+            detail = f"，升级件：{'/'.join(ups)}" if mode == "upgrade" and ups else ""
             self.c.report_discovery(f"{kind}-lv{new_level}",
-                                    f"{verb}【{name}】Lv{new_level}，花费 ${action['cost']}")
+                                    f"真实{verb}【{name}】Lv{new_level}{detail}，花费 ${action['cost']}")
         else:
             act = "建造" if mode == "build" else "升级"
-            note = res.get("note", "")
-            if mode == "upgrade" and any(w in note for w in ("已升满", "没有可升级", "不支持升级")):
-                self.ranch.level[kind] = MAX_LEVEL
-            self._say(f"build-{kind}", f"【自主】{act} {kind} 未成功：{note}", every=4)
+            self._say(f"build-{kind}", f"【自主】真实{act}{kind}未成功：{res.get('note','')}", every=4)
 
     def _gather_and_sell(self) -> None:
         # 混合模式：钱必须来自真实动作。mod 的 harvest/sell 是"凭空注入结晶/兑换资金"
@@ -236,13 +334,8 @@ class Brain:
         gr = self.io.enter_game()
         if not gr.get("ok"):
             self.c.say(f"【启动】{gr.get('note','')}")
-        if hasattr(self.io, "get_facilities"):
-            try:
-                for kind, lvl in (self.io.get_facilities() or {}).items():
-                    if lvl > self.ranch.level.get(kind, 0):
-                        self.ranch.level[kind] = lvl
-            except Exception:
-                pass
+        if hasattr(self.io, "scan_facilities"):
+            self._sync_ranch_from_facilities()
         hotkey_ok = self._hotkey.start()
         if not hotkey_ok:
             self.c.say("【提示】V 键热键没有挂上；可在插件控制台切换观望或自主经营")

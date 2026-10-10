@@ -1,66 +1,85 @@
 # 史莱姆牧场自动游玩 —— 用户指南
 
 ## 一、这是什么
-NEKO 连接插件后，默认不操作游戏。按键如下：
+NEKO 连接插件后，默认**观望**，不操作游戏。按键如下：
 
-- **V 键**：在观望和自主经营之间切换。没有 pynput 时，Windows 上仍用系统热键。
-  - **观望（默认）**：猫娘不走路、不按键。要她看见画面，请自己打开 NEKO 的屏幕分享。
-  - **自主经营**：先到结晶市场，再收食物投喂、收结晶卖掉。钱够费用两倍才建造或升级。
+- **V 键**：在观望和自主经营之间切换。没有 `pynput` 时，Windows 上仍用系统键盘钩子。
+  - **观望（默认）**：不按键、不走路、不主动说话。要猫娘看见画面，请自己打开 NEKO 的屏幕分享。
+  - **自主经营**：先到结晶市场，再收食物投喂、收结晶卖掉，钱够费用两倍才建造或升级。
 
-自主经营做这些事：
-1. 人在主牧场就走到结晶市场；走不到就传送过去。
-2. 吸起地上的食物，投进最近的围栏。
-3. 吸起结晶，投进结晶市场。资金没增加就不算卖出。
-4. 建造或升级围栏、鸡圈、菜园。每种建筑只升级一次。
+自主经营一轮做这些事：
+1. 人在主牧场就走到结晶市场；连续两次走不到、或不在主牧场，就传到市场前。
+2. 吸起地上的食物。画面没有变化就不算收进背包，也不会去围栏投。
+3. 走到最近围栏，把背包里的东西投出去。
+4. 吸起结晶，拿到市场投掷。卖完资金没有增加，不算卖出。
+5. 建造或升级围栏、鸡圈、菜园，每种只建一次、再加一个升级件。
+
+不跑图、不抓野生史莱姆。
 
 ## 二、快速验收（不用打开游戏也能验证逻辑）
-核心自带 **SIM 模拟模式**，用同一套决策代码跑一遍，能看到四项要求是否都会触发。
+核心自带 **SIM 模拟模式**，用同一套决策代码跑一遍。
 
 ```bat
-:: 先安装依赖(可选，SIM 只需 Python 3.11+ 标准库)
+:: 创建 .venv-core 并安装依赖（SIM 只需 Python 3.10+ 标准库）
 setup.bat
 
-:: 快速跑 20 轮自主游玩并退出
-python run_standalone.py --ticks 20 --interval 0
+:: 快速跑 20 轮自主游玩并退出（--ticks 会临时切到自主经营）
+py -3 run_standalone.py --ticks 20 --interval 0 --backend sim
 
 :: 查看自主动作日志
 notepad data\runtime\outbox.jsonl
 ```
 
-看到 `[新发现]` 包含「建造/升级」「探索到了新区域」「抓捕到了新史莱姆」以及「售卖结晶」收入，
-即为通过。
-
 ## 三、安装到 NEKO
-1. 命令提示符进入脚本目录，运行 `setup.bat`（创建 `.venv-core` 并安装依赖）。
-2. 把整个 `slime_ranch_autopilot` 文件夹复制到 NEKO 仓库的：
-   ```
-   plugin/plugins/slime_ranch_autopilot/
-   ```
-3. 启动/重启 NEKO，在 **插件管理器** 里能看到「史莱姆牧场自动游玩」
-   （`auto_start=true`，正常会自动启动）。面板里有：
-   - 状态（运行中 / 模式 / 阶段 / 资金 / 最新发现）
-   - 启动 / 停止 按钮
-   - **语音无输入接管秒数**（可改，默认 10）
-   - 手动指令输入框（测试用）
-4. 在 `E:\neko插件\N.E.K.O-main\plugin\plugins\` 下确认与上面路径一致。
+在仓库根目录双击 `install.bat`，或执行：
+
+```bat
+py -3 install.py
+```
+
+脚本会：
+1. 把仓库复制到旁边的 `N.E.K.O\plugin\plugins\slime_ranch_autopilot`（目录名必须是下划线）。
+2. 在那份副本里建 `.venv-core` 并安装 Pillow。
+3. 把 `engine_python` 和找到的 `SlimeRancher.exe` 写入副本的 `plugin.toml`。
+4. 用系统 `csc.exe` 编译 `SlimeBridge.dll`，覆盖到游戏的 `Mods\SlimeBridge.dll`。
+
+然后完全退出游戏再进存档，浏览器打开 `http://127.0.0.1:8124/api/health`，返回
+`{"ok":true,"name":"slime_bridge"}` 即桥接就绪。最后重启 NEKO，在插件管理器里可看到
+「史莱姆牧场自动游玩」，面板上有状态、启动/停止按钮和手动指令输入框。
+
+> **打开 NEKO「用户插件」总开关，不会自动拉起自动化核心，也不会自动启动游戏窗口。**
+> 核心只在你点面板上的「启动自动游玩」按钮时才 spawn；想让它顺带自动开游戏、进最近存档，
+> 需要在 `plugin.toml` 的 `[slime_ranch]` 里把 `auto_launch_game` 显式改成 `true`（默认 `false`）。
 
 > 若 NEKO 插件 SDK 校验入口路径，请确保 `plugin.toml` 里 `entry` 与你放入的文件夹名一致
 > （默认都是 `slime_ranch_autopilot`）。
 
-## 四、真实游玩（live 模式）前的校准
-实时画面识别（截图→模板匹配/OCR→键鼠控制）对以下条件敏感，请先校准：
+## 四、真实游玩（hybrid 模式）
+推荐后端是 `hybrid`（SlimeBridge 读状态/坐标 + 真实键鼠转向走路 + 画面验证吸附）。
+在 `plugin.toml` 的 `[slime_ranch]` 里：
+- `backend = "hybrid"`
+- `game_exe` 留空则自动在常见 Steam 目录里找游戏。
+- 需要"吸附必须画面有变化才算成功"时，把 `engine_python` 指向 `.venv-core\Scripts\python.exe`。
 
-1. **窗口化 + 固定分辨率**：游戏设为 **窗口化** 或 **无边框 1280×720**，并固定窗口位置
-   （建议左上角 0,0）。Steam 启动项可加：`SlimeRancher.exe -popupwindow -w 1280 -h 720`。
-2. **模拟键鼠/OCR 权限**：用管理员运行 NEKO 与核心；安装 Tesseract 并加入 PATH。
-3. **模板图片**：`core/vision.py` 的 `locate()` 依赖目标小图；请在 `data/templates/` 放入
-   按钮/物体截图用于定位。
-4. **切到真实控制**：在 `plugin.toml` 或 `data/runtime/config.json` 中把 `backend` 改为 `live`，
-   并填对 `game_exe`、`engine_python`（指向 `.venv-core\Scripts\python.exe`）。
-5. **备份存档**：`LocalLow\Monomi Park\Slime Rancher` 下的 `.sav` 建议先备份，防止误操作造成损失。
+自主经营的建造/升级走**游戏内真实 UI 购买**：走到空地块/已有设施跟前 → 等购买/升级菜单出现
+→ 用真实鼠标点对应按钮 → 用设施快照+资金变化验证生效。这要求游戏里的 SlimeBridge mod 是
+含 `scan_plot` / `scan_facilities` / `ui_buttons` 的新版；改过 `bridge/SlimeBridge/*.cs` 后必须
+**完全退出游戏**再编译覆盖 `Mods\SlimeBridge.dll`（游戏开着时 DLL 被占用写不进去）。
+结晶市场的站位是贴近投入口（橙色投掷管）正前方约 3.5m、正对投掷口。
+
+改完 C# 桥或后端配置后重新跑 `install.bat`；游戏正在运行时覆盖 `Mods\SlimeBridge.dll` 会失败，
+请先完全退出游戏。
+
+### 4.1 mod 接口契约（NEKO 接入预留）
+- 加载位：`<游戏目录>\Mods\SlimeBridge.dll`（UnityCoreMod/SRMP.dll 加载）；网络位：`127.0.0.1:8124`，
+  与 `plugin.toml` 的 `[slime_ranch] bridge_port` 必须一致。
+- 能力握手：插件启动核心后先读 `GET /api/health` 的 `version`/`features`；mod 缺 `ui_buttons`
+  等动作时，自主经营会明确提示"更新 Mods\SlimeBridge.dll"，**不会**回退到只扣钱的魔法购买。
+- 完整动作清单见 `bridge/SlimeBridge/ModInfo.txt`（含 `scan_plot`/`scan_facilities`/`ui_buttons`/
+  `debug_ui` 与 payload 约定）。改 mod 后记得同步更新该文件与 `/api/health` 的 features。
 
 ## 五、常见问题
-- **V 键没反应**：热键需要本机允许全局键盘钩子。也可以在插件控制台点「切到自主经营」或「切到观望」。
+- **V 键没反应**：热键需要本机允许全局键盘钩子；也可在插件控制台点「切到自主经营」或「切到观望」。
 - **吸了但没去卖**：画面没有变化时，这次不算收进背包，也不会去市场空投。
-- **建造一直没发生**：资金要达到该档费用的两倍。围栏首建是 225，至少要有 450。每种建筑只会再升级一次。
-- **插件面板启动失败**：参考 `data/runtime/` 下日志，并确认解释器路径正确。
+- **建造一直没发生**：资金要达到该档费用的两倍。围栏首建 225，至少要有 450。每种建筑只会再升级一次。
+- **插件面板启动失败**：参考 `data\runtime` 下的日志，并确认 `engine_python` 解释器路径正确。
