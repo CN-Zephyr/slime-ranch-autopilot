@@ -95,7 +95,8 @@ public class SlimeBridgeServer
     public const string ModVersion = "0.4.0";
     public const string ModFeatures =
         "[\"status\",\"action\",\"scan_target\",\"scan_corral\",\"scan_market\",\"scan_food\"," +
-        "\"scan_plort\",\"scan_plot\",\"scan_facilities\",\"ui_buttons\",\"debug_ui\",\"set_overlay\"]";
+        "\"scan_plort\",\"scan_plot\",\"scan_facilities\",\"ui_buttons\",\"debug_ui\",\"set_overlay\"," +
+        "\"tp_market\",\"tp_plot\",\"tp_item\",\"feed_show\"]";
     private readonly HttpListener _listener;
     private Thread _thread;
     private volatile bool _running;

@@ -383,6 +383,18 @@ class BridgeIOController:
         res = self._post_action("tp_market")
         return {"ok": res.get("ok", False), "note": res.get("note", "传送到市场失败")}
 
+    def tp_plot(self, kind: str) -> Dict[str, Any]:
+        res = self._post_action("tp_plot", kind or "corral")
+        return {"ok": res.get("ok", False), "note": res.get("note", "无法出现在地块前")}
+
+    def tp_item(self, kind: str) -> Dict[str, Any]:
+        res = self._post_action("tp_item", kind or "food")
+        return {"ok": res.get("ok", False), "note": res.get("note", "附近没有可瞬移的目标")}
+
+    def feed_show(self) -> Dict[str, Any]:
+        res = self._post_action("feed_show")
+        return {"ok": res.get("ok", False), "note": res.get("note", "投喂展示失败")}
+
     def build(self, kind: str) -> Dict[str, Any]:
         st = self._get_status()
         lvl = (st.get("facilities") or {}).get(kind, {}).get("level", 0)

@@ -213,6 +213,7 @@ class WalkCaptureIO:
                 return {"ok": False, "moved": False}
             improved = last_d is not None and d < last_d - 0.4   # 距离确在缩短 = 在往前走
             last_d = d
+            pos_before = (float(t.get("px", 0.0)), float(t.get("py", 0.0)))
             before = self._capture_frame()
             if d > 60:
                 hold, keys = 2.2, ["w", "shift"]        # 远距离：跑步，大步长
@@ -228,28 +229,34 @@ class WalkCaptureIO:
             except Exception:
                 return {"ok": False, "moved": False}
             time.sleep(0.15)
-            # 眼睛：画面没变 且 距离也没缩短 才算卡住（失焦/被墙挡）-> 先重抢焦点再试
-            if before is not None and vision is not None and vision is not False:
+            after_scan = rescanner()
+            moved_m = 0.0
+            if after_scan.get("ok"):
+                moved_m = ((float(after_scan.get("px", 0.0)) - pos_before[0]) ** 2
+                           + (float(after_scan.get("py", 0.0)) - pos_before[1]) ** 2) ** 0.5
+            # 人几乎没挪动就是原地踏步：不要继续按住 W。侧移一次仍不动就停，交给传送到目标前。
+            stepping = moved_m < 0.3 and not improved
+            if not stepping and before is not None and vision not in (None, False):
                 after = self._capture_frame()
                 mv = vision.movement_fraction(before, after)
-                if mv is not None and mv < 0.012 and not improved:
-                    stalls += 1
-                    if stalls >= 2:
-                        # 连续卡住 = 大概率被墙/围栏挡住：保持面向目标，A/D 侧移绕行 1.3s
-                        stalls = 0
-                        side = "a" if (detours % 2 == 0) else "d"
-                        detours += 1
-                        try:
-                            win.key_hold(side, 1.3)
-                        except Exception:
-                            return {"ok": False, "moved": False}
-                        if detours >= 5:
-                            t2 = rescanner()            # 绕了多圈仍被堵：放弃前最后确认够近
-                            if t2.get("ok") and float(t2.get("dist", 1e9)) <= accept_dist:
-                                return {"ok": True, "moved": True}
-                            return {"ok": False, "moved": False}
-                    else:
-                        self._lock_mouse()              # 第一次疑似卡住：先重锁焦点再走
+                stepping = mv is not None and mv < 0.012 and not improved
+            if stepping:
+                stalls += 1
+                if stalls >= 2:
+                    stalls = 0
+                    detours += 1
+                    if detours >= 2:
+                        t2 = rescanner()
+                        if t2.get("ok") and float(t2.get("dist", 1e9)) <= accept_dist:
+                            return {"ok": True, "moved": True}
+                        return {"ok": False, "moved": False, "stuck": True,
+                                "note": "原地踏步，已停止空走"}
+                    try:
+                        win.key_hold("a" if detours % 2 else "d", 0.6)
+                    except Exception:
+                        return {"ok": False, "moved": False, "stuck": True, "note": "原地踏步，已停止空走"}
+                else:
+                    self._lock_mouse()
         t = rescanner()
         got = t.get("ok") and float(t.get("dist", 1e9)) <= accept_dist
         return {"ok": got, "moved": True}
@@ -526,6 +533,85 @@ class WalkCaptureIO:
         return {"ok": False, "gains": 0,
                 "note": "投进市场后资金没有增加，这次不算卖出"}
 
+    def grab_here(self, kind: str) -> Dict[str, Any]:
+        """瞬移到食物或结晶旁边，再吸附。不走路。"""
+        label = "食物" if kind == "food" else "结晶"
+        tp = self.io.tp_item(kind) if hasattr(self.io, "tp_item") else {"ok": False, "note": "无法瞬移"}
+        if not tp.get("ok"):
+            return tp
+        time.sleep(0.45)
+        scanner = self.io.scan_food if kind == "food" else self.io.scan_plort
+        target = scanner()
+        if target.get("ok"):
+            self._turn_toward(target, rescanner=scanner, max_steps=6)
+        vac = self._vacuum(0.9)
+        if vac.get("aborted"):
+            return vac
+        if not vac.get("visual"):
+            return {"ok": False, "note": "%s，但吸附后画面没有变化" % tp.get("note", "")}
+        return {"ok": True, "note": "已瞬移到%s旁边并吸起" % label}
+
+    def feed_here(self) -> Dict[str, Any]:
+        """瞬移到围栏前，做出投喂，并尝试把食物放进喂食器。"""
+        tp = self.io.tp_plot("corral") if hasattr(self.io, "tp_plot") else {"ok": False, "note": "无法瞬移到围栏"}
+        if not tp.get("ok"):
+            return tp
+        time.sleep(0.45)
+        win = self._load()
+        if win not in (None, False):
+            target = self.io.scan_corral() if hasattr(self.io, "scan_corral") else {"ok": False}
+            if target.get("ok"):
+                self._turn_toward(target, rescanner=self.io.scan_corral, max_steps=6)
+            try:
+                center = self._center()
+                if center:
+                    win.mouse_click(center[0], center[1])
+            except Exception:
+                pass
+        magic = self.io.feed_show() if hasattr(self.io, "feed_show") else {"ok": False, "note": ""}
+        return {"ok": True, "note": "%s。%s" % (tp.get("note", "已到围栏前"), magic.get("note", ""))}
+
+    def sell_here(self) -> Dict[str, Any]:
+        """瞬移到结晶市场前再投掷，不走路。"""
+        tp = self.io.tp_market() if hasattr(self.io, "tp_market") else {"ok": False, "note": "无法瞬移到市场"}
+        if not tp.get("ok"):
+            return {"ok": False, "gains": 0, "note": tp.get("note", "")}
+        time.sleep(0.45)
+        return self._throw_into_market()
+
+    def _throw_into_market(self, throws: int = 6) -> Dict[str, Any]:
+        win = self._load()
+        if win is None or win is False or not self._ensure_ready():
+            return {"ok": False, "gains": 0, "note": "未找到游戏窗口"}
+        self._lock_mouse()
+        if not self._turn_toward(self._scan_port_close(), rescanner=self._scan_port_close, max_steps=8):
+            return {"ok": False, "gains": 0, "note": "已在市场前，但没对准投入口"}
+        try:
+            before = int(self.io.read_money())
+        except Exception:
+            before = -1
+        c = self._center()
+        if not c:
+            return {"ok": False, "gains": 0, "note": "取不到窗口中心"}
+        try:
+            if not self._pitch_toward():
+                return {"ok": False, "gains": 0, "note": "已在市场前，但视线没对准投入口"}
+            for _ in range(throws):
+                win.mouse_hold(c[0], c[1], 0.45)
+                time.sleep(0.3)
+            time.sleep(1.2)
+        except Exception:
+            return {"ok": False, "gains": 0, "note": "投出点击失败"}
+        try:
+            after = int(self.io.read_money())
+        except Exception:
+            after = -1
+        gains = max(0, after - before) if before >= 0 and after >= 0 else 0
+        if gains > 0:
+            return {"ok": True, "gains": gains,
+                    "note": f"已瞬移到市场并卖出，收入 ${gains}，当前资金 ${after}"}
+        return {"ok": False, "gains": 0, "note": "已瞬移到市场并投掷，但资金没有增加"}
+
     # ---------------- 真实 UI 购买（走到设备→开菜单→点按钮→验证） ----------------
     # 地块菜单的交互键：实现期探针实测 SR1 是靠近自动弹出还是按键弹出后固化在这里。
     INTERACT_KEYS = ("e",)
@@ -564,17 +650,22 @@ class WalkCaptureIO:
         wres = self._walk_to_point(final_dist, 60, scanner,
                                    stall_limit=8, final_dist=final_dist + 4.0)
         if not wres.get("ok"):
-            # 长距离容易被建筑/围栏堵死：回牧场房子(开阔区)重置一次再走
-            try:
-                self.io.go_home()
-                time.sleep(1.5)
-            except Exception:
-                pass
-            wres = self._walk_to_point(final_dist, 45, scanner,
-                                       stall_limit=8, final_dist=final_dist + 4.0)
-        if not wres.get("ok"):
-            return {"ok": False, "note": f"未能走到{kind}地块跟前（疑似失焦/被堵）"}
+            return {"ok": False, "stuck": bool(wres.get("stuck")),
+                    "note": wres.get("note") or f"未能走到{kind}地块跟前"}
         return {"ok": True, "note": f"已走到{kind}地块跟前"}
+
+    def arrive_plot(self, kind: str, final_dist: float = 3.0) -> Dict[str, Any]:
+        """先走路。原地踏步或走不到时，直接出现在地块前面，让玩家看见人在目标跟前。"""
+        walked = self.approach_plot(kind, final_dist)
+        if walked.get("aborted"):
+            return walked
+        if walked.get("ok"):
+            return walked
+        tp = self.io.tp_plot(kind) if hasattr(self.io, "tp_plot") else {"ok": False, "note": "无法出现在地块前"}
+        if tp.get("ok"):
+            time.sleep(0.8)
+            return {"ok": True, "shown": True, "note": tp.get("note", "已出现在地块前")}
+        return walked
 
     def _click_candidates(self, btn: Dict[str, Any], ui: Dict[str, Any]):
         """由按钮上报的渲染坐标生成绝对屏幕坐标候选（多种原点/翻转假设）。
@@ -697,9 +788,12 @@ class WalkCaptureIO:
         verify 返回可比较的设施快照（地块类型+升级列表）。钱掉了但快照没变=误点，
         判失败且本轮不重试，避免反复误扣钱。
         """
-        ap = self.approach_plot("empty" if mode == "build" else kind)
+        spot = "empty" if mode == "build" else kind
+        ap = self.arrive_plot(spot)
         if not ap.get("ok"):
             return ap
+        if ap.get("shown"):
+            time.sleep(0.4)
         # 购买页要"对着地块边的终端桩按交互键"才开（用户确认），终端桩在地块某一侧：
         # 贴近→对准→试 E→没菜单就沿边缘横移/再贴近，换方位重试，最多 6 轮。
         def scanner():
@@ -736,8 +830,14 @@ class WalkCaptureIO:
         except Exception:
             before_money = -1
         before = verify()
-        cr = self.click_ui_button(keywords)
+        cr = self.click_ui_button(keywords, timeout=4.0)
         if not cr.get("ok"):
+            magic = self.io.build(kind) if mode == "build" else self.io.upgrade(kind)
+            if magic.get("ok"):
+                time.sleep(0.6)
+                return {"ok": True, "shown": True,
+                        "note": "人已经站在地块前，直接完成%s，请看画面。%s" % (
+                            "建造" if mode == "build" else "升级", magic.get("note", ""))}
             return cr
         time.sleep(1.5)
         after = verify()
@@ -751,6 +851,32 @@ class WalkCaptureIO:
         if 0 <= after_money < before_money:
             return {"ok": False, "note": "扣了钱但设施没变化，疑似误点，本轮不再重试"}
         return {"ok": False, "note": "点击后设施状态没有变化，本次购买未生效"}
+
+    def feed_visible(self) -> Dict[str, Any]:
+        """投喂要让玩家看见：走到或出现在围栏前，做出投掷，再尝试把食物放进喂食器。"""
+        arrived = self.arrive_plot("corral", 4.0)
+        if not arrived.get("ok"):
+            return arrived
+        win = self._load()
+        if win is None or win is False:
+            return {"ok": False, "note": "未找到游戏窗口"}
+        target = self.io.scan_corral() if hasattr(self.io, "scan_corral") else {"ok": False}
+        if target.get("ok"):
+            self._turn_toward(target, rescanner=self.io.scan_corral, max_steps=8)
+        try:
+            win.mouse_move_rel(0, 30)
+            time.sleep(0.1)
+            center = self._center()
+            if center:
+                win.mouse_click(center[0], center[1])
+                time.sleep(0.25)
+                win.mouse_click(center[0], center[1])
+        except Exception:
+            pass
+        magic = self.io.feed_show() if hasattr(self.io, "feed_show") else {"ok": False, "note": ""}
+        where = arrived.get("note", "已到围栏前")
+        extra = magic.get("note", "")
+        return {"ok": True, "note": "%s。已做出投喂动作。%s" % (where, extra)}
 
     def wander_step(self, seconds: float = 1.5) -> Dict[str, Any]:
         """无目标时随机真实走动几秒（漫游），让画面真实移动而非原地/瞬移。"""

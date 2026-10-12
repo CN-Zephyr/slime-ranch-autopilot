@@ -547,6 +547,9 @@ namespace SlimeBridge
                             case "ui_hover": UiHoverReal(ar); break;
                             case "debug_ui": DebugUiReal(ar); break;
                             case "tp_market": TeleportMarketReal(ar); break;
+                            case "tp_plot": TeleportPlotReal(kind, ar); break;
+                            case "tp_item": TeleportItemReal(kind, ar); break;
+                            case "feed_show": FeedShowReal(ar); break;
                             case "debug_market": DebugMarketReal(ar); break;
                             case "probe": ProbeNearReal(ar, kind); break;
                             case "continue": ContinueSaveReal(ar); break;
@@ -1511,15 +1514,103 @@ namespace SlimeBridge
                     if (_cachedMarket == null) _marketFailed = true;
                 }
                 if (_cachedMarket == null) { ar.ok = false; ar.note = "场景中找不到结晶市场"; return; }
-                Vector3 stand = _cachedMarket.Value + _cachedStandDir * 14f;
+                Vector3 port = _cachedMarket.Value;
+                Vector3 stand = port + _cachedStandDir * 3.5f;
                 stand.y = _player.transform.position.y;
-                Vector3 dest = stand + Vector3.up * 0.5f;
-                RunOnMain(() => { _player.transform.position = dest; });
+                Vector3 look = port - stand;
+                look.y = 0f;
+                RunOnMain(() =>
+                {
+                    _player.transform.position = stand + Vector3.up * 0.5f;
+                    if (look.sqrMagnitude > 0.01f)
+                        _player.transform.rotation = Quaternion.LookRotation(look.normalized);
+                });
                 ar.ok = true;
                 ar.area = "牧场";
-                ar.note = "已传送到结晶市场前";
+                ar.note = "已瞬移到结晶市场前";
             }
             catch (Exception e) { ar.ok = false; ar.note = "传送到市场失败: " + e.Message; }
+        }
+
+        // 把玩家放到地块跟前并转向它，让购买/投喂发生在镜头里。
+        private void StandAt(Vector3 aim)
+        {
+            if (_player == null) return;
+            Vector3 back = _player.transform.position - aim;
+            back.y = 0f;
+            if (back.sqrMagnitude < 1f) back = -_player.transform.forward;
+            if (back.sqrMagnitude < 0.01f) back = Vector3.back;
+            back.Normalize();
+            Vector3 stand = aim + back * 3.0f;
+            stand.y = _player.transform.position.y;
+            Vector3 look = aim - stand;
+            look.y = 0f;
+            _player.transform.position = stand + Vector3.up * 0.25f;
+            if (look.sqrMagnitude > 0.01f)
+                _player.transform.rotation = Quaternion.LookRotation(look.normalized);
+        }
+
+        private void TeleportPlotReal(string kind, ActionResult ar)
+        {
+            ScanPlotReal(string.IsNullOrEmpty(kind) ? "corral" : kind, ar);
+            if (!ar.ok || _player == null) return;
+            Vector3 aim = new Vector3(ar.tx, _player.transform.position.y, ar.tz);
+            RunOnMain(() => StandAt(aim));
+            ar.ok = true;
+            ar.note = "已出现在" + (string.IsNullOrEmpty(kind) ? "地块" : kind) + "前面";
+        }
+
+        private void TeleportItemReal(string kind, ActionResult ar)
+        {
+            EnsureScene();
+            if (_player == null) { ar.ok = false; ar.note = "未进入存档"; return; }
+            if (kind == "plort") ScanProduce(ar, false, 120f, "结晶");
+            else ScanProduce(ar, true, 120f, "食物");
+            if (!ar.ok) return;
+            Vector3 aim = new Vector3(ar.tx, _player.transform.position.y, ar.tz);
+            RunOnMain(() => StandAt(aim));
+            ar.ok = true;
+            ar.note = "已瞬移到" + (kind == "plort" ? "结晶" : "食物") + "旁边";
+        }
+
+        // 站到围栏前。能写进喂食器就放一份胡萝卜，写不进也保持站位，交给键鼠做出投喂动作。
+        private void FeedShowReal(ActionResult ar)
+        {
+            EnsureScene();
+            LandPlot plot = FindPlotOfKind("corral");
+            if (plot == null || _player == null)
+            {
+                ar.ok = false;
+                ar.note = "没有围栏，无法投喂";
+                return;
+            }
+            RunOnMain(() => StandAt(plot.transform.position));
+            bool fed = false;
+            try
+            {
+                var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;
+                object foodId = Enum.Parse(typeof(Identifiable.Id), "CARROT_VEGGIE");
+                foreach (var c in plot.GetComponentsInChildren<Component>(true))
+                {
+                    if (c == null) continue;
+                    if (c.GetType().Name.IndexOf("Feeder", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                    object ammo = null;
+                    var field = c.GetType().GetField("m_Ammo", flags) ?? c.GetType().GetField("ammo", flags);
+                    if (field != null) ammo = field.GetValue(c);
+                    if (ammo == null) continue;
+                    var add = ammo.GetType().GetMethod("MaybeAddToSlot", flags);
+                    if (add == null) continue;
+                    var ps = add.GetParameters();
+                    object[] args = ps.Length >= 2 ? new object[] { foodId, null } : new object[] { foodId };
+                    if (ps.Length >= 3) args = new object[] { foodId, null, 6 };
+                    RunOnMain(() => add.Invoke(ammo, args));
+                    fed = true;
+                    break;
+                }
+            }
+            catch (Exception e) { UMFLog.Log("[SlimeBridge] feed show err: " + e.Message); }
+            ar.ok = true;
+            ar.note = fed ? "已站在围栏前，食物放进了喂食器" : "已站在围栏前，准备投喂";
         }
 
         // ---- 建造（真实：直接走游戏原生购买链路）----
@@ -1563,6 +1654,8 @@ namespace SlimeBridge
 
             int cur = ReadMoneyReal();
             if (cur < cost) { ar.ok = false; ar.note = "资金不足（需要 $" + cost + "，当前 $" + cur + "）"; return; }
+
+            RunOnMain(() => StandAt(plot.transform.position));
 
             // 2) 真实扣钱（与游戏 BuyPlot 完全相同的 SpendCurrency 调用）
             try
@@ -1626,6 +1719,7 @@ namespace SlimeBridge
                 ar.ok = false; ar.note = "资金不足（需要约 $" + cost + "，当前 $" + ReadMoneyReal() + "）";
                 return;
             }
+            RunOnMain(() => StandAt(plot.transform.position));
             AddCurrencyReal(-cost);
 
             bool ok = false;
