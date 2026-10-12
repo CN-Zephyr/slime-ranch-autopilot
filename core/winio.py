@@ -232,6 +232,31 @@ def get_window_rect(hwnd: int) -> Optional[Tuple[int, int, int, int]]:
     return None
 
 
+def get_client_rect(hwnd: int) -> Optional[Tuple[int, int, int, int]]:
+    """客户区左上角的屏幕坐标 + 客户区宽高（物理像素）。
+
+    点 UI 按钮必须用客户区而不是整窗矩形：DPI 虚拟化下标题栏/边框会让
+    整窗矩形换算出来的点击点整体偏移（实测 200% 缩放下偏一整条标题栏）。
+    """
+    rect = wintypes.RECT()
+    if not user32.GetClientRect(hwnd, ctypes.byref(rect)):
+        return None
+    cw = rect.right - rect.left
+    ch = rect.bottom - rect.top
+    pt = wintypes.POINT(0, 0)
+    if not user32.ClientToScreen(hwnd, ctypes.byref(pt)):
+        return None
+    return (pt.x, pt.y, cw, ch)
+
+
+def is_foreground(hwnd: int) -> bool:
+    """游戏窗口当前是否为前台（SendInput 只送进前台窗口，走位循环据此补抢焦点）。"""
+    try:
+        return bool(user32.GetForegroundWindow() == hwnd)
+    except Exception:
+        return False
+
+
 def _force_foreground(hwnd: int) -> bool:
     """更强的前台激活：绕过 Windows 对 SetForegroundWindow 的前台限制。
 

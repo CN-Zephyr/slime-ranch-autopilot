@@ -128,7 +128,7 @@ class SlimeRanchAutopilotPlugin(NekoPluginBase):
         self._seen_msg: int = 0
 
     # ------------------------------------------------------------------ 生命周期
-    @lifecycle(id="startup", name="启动", description="启动时同步配置并拉起自动化核心")
+    @lifecycle(id="startup", name="启动", description="启动时同步配置（不自动拉起自动化核心，需手动点「启动自动游玩」）")
     async def startup(self, **_):
         # 配置为异步代理，用 dump 一次性读入并缓存到 self._cfg；不能同步 .get。
         try:
@@ -142,10 +142,9 @@ class SlimeRanchAutopilotPlugin(NekoPluginBase):
             pass
         self._sync_config_to_disk()
         self._poll_task = asyncio.create_task(self._poll_outbox_loop())
-        # 自动接管：随插件启动直接拉core，让自主游玩立即可见（可通过 auto_start=false 关闭）
-        if bool(_get_cfg(self, "auto_start", True)) and not (self._proc and self._proc.poll() is None):
-            self._spawn_core()
-        # auto_start=true 时随 NEKO 启动自动接管游戏
+        # 插件被激活/随总开关启动时，不再自动拉起自动化核心：
+        # 核心只在用户在面板点「启动自动游玩」(start_autopilot) 时才 spawn，
+        # 避免"开总开关 -> 静默拉起核心 -> 核心一启动就尝试唤起游戏窗口"这条链路。
         self.logger.info("slime_ranch_autopilot 已启动(runtime=%s)", self._runtime_dir)
         return Ok({"started": True})
 
@@ -163,7 +162,7 @@ class SlimeRanchAutopilotPlugin(NekoPluginBase):
             "timeout_seconds": int(_get_cfg(self, "timeout_seconds", 10)),
             "default_mode": _get_cfg(self, "default_mode", "watch"),
             "game_exe": _get_cfg(self, "game_exe", ""),
-            "auto_launch_game": bool(_get_cfg(self, "auto_launch_game", True)),
+            "auto_launch_game": bool(_get_cfg(self, "auto_launch_game", False)),
             "engine_python": _get_cfg(self, "engine_python", ""),
             "backend": _get_cfg(self, "backend", "ws"),
             "bridge_host": _get_cfg(self, "bridge_host", "127.0.0.1"),

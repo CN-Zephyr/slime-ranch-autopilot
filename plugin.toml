@@ -44,16 +44,20 @@ timeout_seconds = 10
 default_mode = "watch"
 # 史莱姆牧场一代 exe。留空时核心会在常见 Steam 目录里找；找不到就不自动启动游戏。
 game_exe = ""
-# 是否在启动插件时自动启动游戏并进入最近存档
-auto_launch_game = true
+# 是否在用户点「启动自动游玩」时自动启动游戏并进入最近存档（默认关闭：开插件总开关不会
+# 自动拉起核心，也不会自动开游戏；打开这一项后，仍需手动点「启动自动游玩」才会生效）
+auto_launch_game = false
 # 留空则用启动 NEKO 的那个 Python。需要键鼠和截图依赖时，改成 setup.bat 建出的解释器。
 engine_python = ""
 # 后端：hybrid = 混合模式(SlimeBridge读状态/资金坐标 + 真实键鼠转向/走路/吸附 + 画面验证,推荐)；
 #       ws    = 通过游戏内 SlimeBridge 桥接读状态/执行(最准但为瞬移式魔法操作,画面不动)；
 #       live  = 真实键鼠控制(截图+模拟键鼠,需校准,汇报可能失真)；
 #       sim   = 纯模拟(不碰游戏,用于演示验收)
+# 建造/升级在自主经营里走游戏内真实 UI 购买(走到地块→开菜单→点按钮)，需要 mod 含
+# scan_plot/scan_facilities/ui_buttons 新动作；旧的 build/upgrade 魔法接口不再被自主循环调用。
 backend = "hybrid"
-# ws 后端(切 backend="ws" 时使用)：SlimeBridge 服务地址(本机即可)
+# SlimeBridge 服务地址(本机即可)。bridge_port 必须与 mod 的监听端口(HttpServer.DefaultPort=8124)一致，
+# 这是 NEKO 插件与游戏 mod 之间唯一的接入口。
 bridge_host = "127.0.0.1"
 bridge_port = 8124
 # 未安装 tesseract OCR / 读取资金失败时的兜底资金：-1=未知(不主动建造)；>=0 用该值推进自主游玩。

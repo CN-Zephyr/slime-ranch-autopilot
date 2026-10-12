@@ -66,7 +66,7 @@ class BridgeIOController:
 
     def __init__(self, host: str = "127.0.0.1", port: int = 8124,
                  fallback_funds: int = -1, game_exe: str = "",
-                 auto_launch: bool = True):
+                 auto_launch: bool = False):
         self.client = BridgeClient(host, port)
         self.fallback_funds = fallback_funds  # 桥接读不到资金时的保底值
         self.game_exe = game_exe
@@ -74,6 +74,26 @@ class BridgeIOController:
         self._launched = False  # 只自动拉起一次，避免重复开游戏
         self._last_enter_note = ""
         self._last_status: Dict[str, Any] = {}
+        self._mod_features: List[str] | None = None  # /api/health 能力握手缓存
+
+    # ---------------- mod 能力握手 ----------------
+    def mod_info(self) -> Dict[str, Any]:
+        """读 mod 的 /api/health：版本 + 能力清单（NEKO 接入契约的一部分）。"""
+        h = self.client.get_json("/api/health") or {}
+        feats = h.get("features")
+        return {
+            "ok": bool(h.get("ok")),
+            "version": str(h.get("version") or ""),
+            "features": [str(f) for f in feats] if isinstance(feats, list) else [],
+        }
+
+    def mod_features(self) -> List[str]:
+        if self._mod_features is None:
+            self._mod_features = self.mod_info().get("features", [])
+        return self._mod_features
+
+    def supports(self, feature: str) -> bool:
+        return feature in self.mod_features()
 
     # ---------------- IOController 接口 ----------------
     def enter_game(self) -> Dict[str, Any]:
@@ -213,6 +233,11 @@ class BridgeIOController:
                 return float(v) if v is not None and v != "" else default
             except Exception:
                 return default
+        payload = self._payload_dict(res)
+        try:
+            pitch = float(payload.get("pitch_delta") or 0.0)
+        except Exception:
+            pitch = 0.0
         return {
             "ok": True,
             "kind": res.get("target_kind", "market"),
@@ -222,6 +247,7 @@ class BridgeIOController:
             "tx": f("tx", 0.0), "tz": f("tz", 0.0),       # 走向目标 = 市场投入口正面站位点
             "cx": f("cx", 0.0), "cz": f("cz", 0.0),       # 市场中心（投掷对准目标）
             "cyaw": f("cyaw", 0.0),
+            "pitch": pitch,                              # 相机→投入口俯仰角差(度, 正=需抬头)
             "area": res.get("area", ""),
             "note": res.get("note", ""),
         }
@@ -252,9 +278,122 @@ class BridgeIOController:
     def scan_plort(self) -> Dict[str, Any]:
         return self._scan_aim("scan_plort", "附近没有结晶")
 
+    # ---------------- 真实建造/升级所需的感知 ----------------
+    @staticmethod
+    def _payload_dict(res: Dict[str, Any]) -> Dict[str, Any]:
+        raw = res.get("payload")
+        if not raw:
+            return {}
+        try:
+            value = json.loads(raw)
+        except Exception:
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _payload_list(res: Dict[str, Any]) -> List[Dict[str, Any]]:
+        raw = res.get("payload")
+        if not raw:
+            return []
+        try:
+            value = json.loads(raw)
+        except Exception:
+            return []
+        return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+    def ui_hover(self) -> Dict[str, Any]:
+        """当前 OS 光标处的 uGUI 射线命中：{"mx","my","n","chain":[命中点沿父链的控件名]}。
+
+        core 用它做点击自校准：先把真实鼠标移到候选点，确认父链里出现目标按钮名再按下，
+        任何 DPI 缩放/画布模式/原点差异都被这个闭环吸收。
+        """
+        res = self._post_action("ui_hover", "")
+        out: Dict[str, Any] = {"ok": bool(res.get("ok")), "n": 0, "chain": [], "mx": 0.0, "my": 0.0}
+        payload = self._payload_dict(res)
+        chain = payload.get("chain")
+        out["chain"] = [str(c) for c in chain] if isinstance(chain, list) else []
+        try:
+            out["n"] = int(payload.get("n") or 0)
+            out["mx"] = float(payload.get("mx") or 0.0)
+            out["my"] = float(payload.get("my") or 0.0)
+        except Exception:
+            pass
+        return out
+
+    def scan_plot(self, kind: str) -> Dict[str, Any]:
+        """混合模式：定位最近的指定类型地块（corral/coop/garden/empty）。
+
+        返回与 scan_target 同构的 yaw/dist（供 real.WalkCaptureIO 做转向/走位反馈），
+        payload 里的 isEmpty/upgrades 供决策与购买验证。
+        """
+        res = self._post_action("scan_plot", kind)
+        if not res.get("ok"):
+            return {"ok": False, "dist": 1e9, "yaw": 0.0,
+                    "note": res.get("note", "没有找到目标地块")}
+        out = self._scan_aim_payload(res, kind)
+        payload = self._payload_dict(res)
+        out["is_empty"] = bool(payload.get("isEmpty"))
+        ups = payload.get("upgrades")
+        out["upgrades"] = [str(u) for u in ups] if isinstance(ups, list) else []
+        return out
+
+    def _scan_aim_payload(self, res: Dict[str, Any], kind: str) -> Dict[str, Any]:
+        def f(key: str, default: float) -> float:
+            try:
+                v = res.get(key, default)
+                return float(v) if v is not None and v != "" else default
+            except Exception:
+                return default
+        return {
+            "ok": True,
+            "kind": kind,
+            "dist": f("dist", 1e9),
+            "yaw": f("yaw_delta", 0.0),
+            "px": f("px", 0.0), "py": f("py", 0.0),
+            "tx": f("tx", 0.0), "tz": f("tz", 0.0),
+            "note": res.get("note", ""),
+        }
+
+    def scan_facilities(self) -> List[Dict[str, Any]]:
+        """全地块清单：[{kind, isEmpty, x, z, upgrades:[...]}]，真实购买验证与进度同步用。"""
+        res = self._post_action("scan_facilities", "")
+        if not res.get("ok"):
+            return []
+        return self._payload_list(res)
+
+    def ui_buttons(self) -> Dict[str, Any]:
+        """当前可见可点的 uGUI 按钮：{"screen_w", "screen_h", "buttons": [{label, sx, sy}]}。"""
+        out: Dict[str, Any] = {"screen_w": 0, "screen_h": 0, "buttons": [], "menu_texts": []}
+        res = self._post_action("ui_buttons", "")
+        if not res.get("ok"):
+            return out
+        payload = self._payload_dict(res)
+        try:
+            out["screen_w"] = int(payload.get("screen_w") or 0)
+            out["screen_h"] = int(payload.get("screen_h") or 0)
+        except Exception:
+            out["screen_w"] = out["screen_h"] = 0
+        buttons = payload.get("buttons")
+        out["buttons"] = [b for b in buttons if isinstance(b, dict)] if isinstance(buttons, list) else []
+        texts = payload.get("menu_texts")
+        out["menu_texts"] = [t for t in texts if isinstance(t, dict)] if isinstance(texts, list) else []
+        return out
+
     def tp_market(self) -> Dict[str, Any]:
         res = self._post_action("tp_market")
         return {"ok": res.get("ok", False), "note": res.get("note", "传送到市场失败")}
+
+    def tp_plot(self, kind: str) -> Dict[str, Any]:
+        res = self._post_action("tp_plot", kind or "corral")
+        return {"ok": res.get("ok", False), "note": res.get("note", "无法出现在地块前")}
+
+    def tp_item(self, kind: str) -> Dict[str, Any]:
+        res = self._post_action("tp_item", kind or "food")
+        return {"ok": res.get("ok", False), "note": res.get("note", "附近没有可瞬移的目标")}
+
+    def feed_show(self) -> Dict[str, Any]:
+        res = self._post_action("feed_show")
+        return {"ok": res.get("ok", False), "note": res.get("note", "投喂展示失败")}
 
     def build(self, kind: str) -> Dict[str, Any]:
         st = self._get_status()

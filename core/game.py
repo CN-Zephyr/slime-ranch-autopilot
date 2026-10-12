@@ -69,9 +69,10 @@ class LiveIOController(IOController):
     """
 
     def __init__(self, game_exe: str = "", calibration: dict = None,
-                 window_exe: str = "SlimeRancher.exe", fallback_funds: int = -1):
+                 window_exe: str = "SlimeRancher.exe", fallback_funds: int = -1,
+                 auto_launch: bool = False):
         self.game_exe = game_exe
-        self.auto_launch = bool(game_exe)
+        self.auto_launch = bool(auto_launch and game_exe)
         self.window_exe = window_exe
         self.calibration = calibration or {}
         self.fallback_funds = fallback_funds  # OCR 不可用时资金兜底值

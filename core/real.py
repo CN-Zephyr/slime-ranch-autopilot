@@ -13,6 +13,7 @@ winio 依赖惰性加载，避免进 sim 模式时拖垮环境。
 """
 from __future__ import annotations
 
+import math
 import time
 from typing import Dict, Any
 
@@ -20,6 +21,8 @@ from typing import Dict, Any
 YAW_TOLERANCE = 5.0
 # 真空枪实用吸附射程（米）：距离小于它就开始按左键吸
 VACUUM_RANGE = 5.0
+# 结晶市场站位：贴到投入口(橙色投掷管)正前方这么近，正对投掷口（用户截图的期望站位）
+MARKET_STAND_DIST = 3.5
 
 
 class WalkCaptureIO:
@@ -120,6 +123,14 @@ class WalkCaptureIO:
         x, y, w, h = rect
         return int(x + w / 2), int(y + h / 2)
 
+    def _reassert_foreground(self, win) -> None:
+        """走位/转向循环里每步补抢焦点：SendInput 只进前台窗口，用户切走就会空走。"""
+        try:
+            if not win.is_foreground(self._hwnd):
+                win.ensure_foreground(self._hwnd)
+        except Exception:
+            pass
+
     # ---------------- 真实操作 ----------------
     def _turn_toward(self, target: Dict[str, Any], max_steps: int = 18,
                      rescanner=None) -> bool:
@@ -136,6 +147,9 @@ class WalkCaptureIO:
         for _ in range(max_steps):
             if self._aborted():
                 return False
+            self._reassert_foreground(win)
+            if _ % 6 == 3:
+                self._dismiss_if_paused()
             yaw = float(target.get("yaw", 0.0))
             if abs(yaw) < YAW_TOLERANCE:
                 return True
@@ -186,6 +200,9 @@ class WalkCaptureIO:
             stopped = self._aborted()
             if stopped:
                 return stopped
+            self._reassert_foreground(win)
+            if _ % 6 == 3:
+                self._dismiss_if_paused()
             t = rescanner()
             if not t.get("ok"):
                 return {"ok": False, "moved": False}
@@ -196,6 +213,7 @@ class WalkCaptureIO:
                 return {"ok": False, "moved": False}
             improved = last_d is not None and d < last_d - 0.4   # 距离确在缩短 = 在往前走
             last_d = d
+            pos_before = (float(t.get("px", 0.0)), float(t.get("py", 0.0)))
             before = self._capture_frame()
             if d > 60:
                 hold, keys = 2.2, ["w", "shift"]        # 远距离：跑步，大步长
@@ -211,28 +229,34 @@ class WalkCaptureIO:
             except Exception:
                 return {"ok": False, "moved": False}
             time.sleep(0.15)
-            # 眼睛：画面没变 且 距离也没缩短 才算卡住（失焦/被墙挡）-> 先重抢焦点再试
-            if before is not None and vision is not None and vision is not False:
+            after_scan = rescanner()
+            moved_m = 0.0
+            if after_scan.get("ok"):
+                moved_m = ((float(after_scan.get("px", 0.0)) - pos_before[0]) ** 2
+                           + (float(after_scan.get("py", 0.0)) - pos_before[1]) ** 2) ** 0.5
+            # 人几乎没挪动就是原地踏步：不要继续按住 W。侧移一次仍不动就停，交给传送到目标前。
+            stepping = moved_m < 0.3 and not improved
+            if not stepping and before is not None and vision not in (None, False):
                 after = self._capture_frame()
                 mv = vision.movement_fraction(before, after)
-                if mv is not None and mv < 0.012 and not improved:
-                    stalls += 1
-                    if stalls >= 2:
-                        # 连续卡住 = 大概率被墙/围栏挡住：保持面向目标，A/D 侧移绕行 1.3s
-                        stalls = 0
-                        side = "a" if (detours % 2 == 0) else "d"
-                        detours += 1
-                        try:
-                            win.key_hold(side, 1.3)
-                        except Exception:
-                            return {"ok": False, "moved": False}
-                        if detours >= 5:
-                            t2 = rescanner()            # 绕了多圈仍被堵：放弃前最后确认够近
-                            if t2.get("ok") and float(t2.get("dist", 1e9)) <= accept_dist:
-                                return {"ok": True, "moved": True}
-                            return {"ok": False, "moved": False}
-                    else:
-                        self._lock_mouse()              # 第一次疑似卡住：先重锁焦点再走
+                stepping = mv is not None and mv < 0.012 and not improved
+            if stepping:
+                stalls += 1
+                if stalls >= 2:
+                    stalls = 0
+                    detours += 1
+                    if detours >= 2:
+                        t2 = rescanner()
+                        if t2.get("ok") and float(t2.get("dist", 1e9)) <= accept_dist:
+                            return {"ok": True, "moved": True}
+                        return {"ok": False, "moved": False, "stuck": True,
+                                "note": "原地踏步，已停止空走"}
+                    try:
+                        win.key_hold("a" if detours % 2 else "d", 0.6)
+                    except Exception:
+                        return {"ok": False, "moved": False, "stuck": True, "note": "原地踏步，已停止空走"}
+                else:
+                    self._lock_mouse()
         t = rescanner()
         got = t.get("ok") and float(t.get("dist", 1e9)) <= accept_dist
         return {"ok": got, "moved": True}
@@ -307,25 +331,71 @@ class WalkCaptureIO:
                 "dist": float(after.get("dist", t.get("dist", 0))),
                 "visual": vres.get("visual", False)}
 
+    def _scan_port_close(self) -> Dict[str, Any]:
+        """重扫市场并把目标换算成"投入口正前方贴近站"。
+
+        旧版用 mod 报的 14m"庭院站位点"，人离投入口太远、投掷不可靠；期望站位是
+        紧贴橙色投掷管正前方（见用户截图）。距离由玩家坐标(px,py)与投入口(cx,cz)
+        自算，朝向用 mod 的 cyaw（指向投入口开孔）。
+        """
+        m = self.io.scan_market()
+        if not m.get("ok"):
+            return m
+        px = float(m.get("px", 0.0) or 0.0)
+        py = float(m.get("py", 0.0) or 0.0)
+        cx = float(m.get("cx", 0.0) or 0.0)
+        cz = float(m.get("cz", 0.0) or 0.0)
+        m["dist"] = math.hypot(cx - px, cz - py)
+        m["yaw"] = float(m.get("cyaw", 0.0) or 0.0)
+        m["tx"], m["tz"] = cx, cz
+        return m
+
     def approach_market(self) -> Dict[str, Any]:
-        """只走到结晶市场站位点，不投掷。人已在牧场时用来重置位置。"""
+        """只走到结晶市场投入口正前方（截图站位），不投掷。人已在牧场时用来重置位置。"""
         if not self._ensure_ready():
             return {"ok": False, "note": "未找到游戏窗口，无法走到市场"}
         stopped = self._aborted()
         if stopped:
             return stopped
         self._lock_mouse()
-        m = self.io.scan_market()
+        m = self._scan_port_close()
         if not m.get("ok"):
             return {"ok": False, "note": m.get("note", "场景中找不到结晶市场")}
         if m.get("area") != "牧场":
             return {"ok": False, "area": m.get("area", ""), "note": "当前不在牧场"}
-        if float(m.get("dist", 1e9)) <= 4.0:
-            return {"ok": True, "note": "已在结晶市场前"}
-        wres = self._walk_to_point(4.0, 40, self.io.scan_market, stall_limit=6, final_dist=10.0)
+        if float(m.get("dist", 1e9)) <= MARKET_STAND_DIST:
+            return {"ok": True, "note": "已在结晶市场投入口前"}
+        wres = self._walk_to_point(MARKET_STAND_DIST, 40, self._scan_port_close,
+                                   stall_limit=6, final_dist=MARKET_STAND_DIST + 4.5)
         if wres.get("ok"):
-            return {"ok": True, "note": "已走到结晶市场前"}
-        return {"ok": False, "note": "未能走到结晶市场"}
+            return {"ok": True, "note": "已走到结晶市场投入口前"}
+        return {"ok": False, "note": "未能走到结晶市场投入口"}
+
+    def _pitch_toward(self, tol: float = 4.0, max_steps: int = 8) -> bool:
+        """闭环收敛视线俯仰到投入口：mod 报 pitch_delta(正=需抬头)，移鼠标补偿再复测。
+
+        盲猜上抬像素是"投进市场不加钱"的根因；改成和 yaw 一样的反馈收敛。
+        """
+        win = self._load()
+        if win is None or win is False:
+            return False
+        for _ in range(max_steps):
+            if self._aborted():
+                return False
+            m = self._scan_port_close()
+            if not m.get("ok"):
+                return False
+            pd = float(m.get("pitch", 0.0) or 0.0)
+            if abs(pd) <= tol:
+                return True
+            step = int(max(-240, min(240, pd * 10)))   # 经验 px/度，闭环会自行修正
+            try:
+                win.mouse_move_rel(0, -step)           # 正 pd=抬头=鼠标上移(负 y)
+            except Exception:
+                return False
+            time.sleep(0.25)
+        m = self._scan_port_close()
+        return abs(float(m.get("pitch", 0.0) or 0.0)) <= (tol + 3.0)
 
     def collect_scanned(self, scanner, label: str) -> Dict[str, Any]:
         """按指定扫描走向并吸附。scanner 需返回与 scan_target 相同的 yaw/dist。"""
@@ -393,15 +463,15 @@ class WalkCaptureIO:
         if win is None or win is False or not self._ensure_ready():
             return {"ok": False, "gains": 0, "note": "未找到游戏窗口"}
         self._lock_mouse()
-        m = self.io.scan_market()
+        m = self._scan_port_close()
         if not m.get("ok"):
             return {"ok": False, "gains": 0, "note": m.get("note", "场景中找不到结晶市场")}
         # 市场在牧场，玩家若在野外直线走回会被牧场围墙挡住，故仅当已在牧场时才真实走去卖
         if m.get("area") != "牧场":
             return {"ok": False, "gains": 0, "note": f"玩家当前在{m.get('area','未知区域')}，暂不穿越围墙去市场，待回到牧场再卖"}
-        # 走向目标 = 投入口正面站位点（mod 的 scan_market 已把 dist/yaw 指向站位点），
-        # 站到 4m 内即对准投入口；堵在路上会自动 A/D 侧移绕行。
-        wres = self._walk_to_point(4.0, 40, self.io.scan_market, stall_limit=6, final_dist=10.0)
+        # 走到投入口正前方贴近站（截图站位）；堵在路上会自动 A/D 侧移绕行。
+        wres = self._walk_to_point(MARKET_STAND_DIST, 40, self._scan_port_close,
+                                   stall_limit=6, final_dist=MARKET_STAND_DIST + 4.5)
         if not wres.get("ok"):
             # 兜底：当前起点可能被卡（贴围墙/建筑/地形缝隙），先传送回牧场房子
             # （开阔区，实测从房子到市场可正常直线走到）再走一次。
@@ -410,24 +480,17 @@ class WalkCaptureIO:
                 time.sleep(1.5)
             except Exception:
                 pass
-            m2 = self.io.scan_market()
+            m2 = self._scan_port_close()
             if m2.get("ok") and m2.get("area") == "牧场":
-                wres = self._walk_to_point(4.0, 30, self.io.scan_market,
-                                           stall_limit=6, final_dist=10.0)
+                wres = self._walk_to_point(MARKET_STAND_DIST, 30, self._scan_port_close,
+                                           stall_limit=6, final_dist=MARKET_STAND_DIST + 4.5)
         if not wres.get("ok"):
-            t = self.io.scan_market()
-            dnote = f"（距投入口站位 {float(t.get('dist', 0)):.0f}m）" if t.get("ok") else ""
+            t = self._scan_port_close()
+            dnote = f"（距投入口 {float(t.get('dist', 0)):.0f}m）" if t.get("ok") else ""
             return {"ok": False, "gains": 0,
                     "note": f"未能走到结晶市场投入口前{dnote}，本轮暂不售卖"}
 
-        def scan_port():
-            """重扫市场并转成"对准投入口开孔"的目标，供最终投掷转向反馈。"""
-            mm = self.io.scan_market()
-            if mm.get("ok"):
-                mm["yaw"] = mm.get("cyaw", 0.0)
-            return mm
-
-        if not self._turn_toward(scan_port(), rescanner=scan_port):
+        if not self._turn_toward(self._scan_port_close(), rescanner=self._scan_port_close):
             return {"ok": False, "gains": 0, "note": "未能对准结晶市场投入口"}
         try:
             before = int(self.io.read_money())
@@ -437,13 +500,25 @@ class WalkCaptureIO:
         if not c:
             return {"ok": False, "gains": 0, "note": "取不到窗口中心"}
         try:
-            # 投入口是建筑上方抬高开孔：对准后上抬视角(约 25px)再投；用蓄力投掷
-            # （按住左键约 0.45s 再松开）让结晶划出弧线飞进开孔，比点射命中率高。
-            win.mouse_move_rel(0, -25)
-            time.sleep(0.15)
-            for _ in range(throws):
+            before = int(self.io.read_money())
+        except Exception:
+            before = -1
+        try:
+            # 先闭环收敛俯仰到投入口(mod 报 pitch_delta)，再投；每发之间只加很小
+            # 的角度散布补偿抛物线误差。盲猜上抬像素是"投进不加钱"的根因。
+            if not self._pitch_toward():
+                return {"ok": False, "gains": 0, "note": "未能把视线俯仰收敛到投入口，本轮暂不售卖"}
+            for i in range(throws):
+                if not self._turn_toward(self._scan_port_close(), rescanner=self._scan_port_close):
+                    break
+                off = [0, 6, -4][i % 3]
+                if off:
+                    win.mouse_move_rel(0, -off)
+                    time.sleep(0.08)
                 win.mouse_hold(c[0], c[1], 0.45)    # 蓄力投出背包结晶
-                time.sleep(0.35)
+                if off:
+                    win.mouse_move_rel(0, off)
+                time.sleep(0.3)
             time.sleep(2.0)                     # 等结晶飞入市场入账
         except Exception:
             return {"ok": False, "gains": 0, "note": "投出点击失败"}
@@ -457,6 +532,351 @@ class WalkCaptureIO:
                     "note": f"已在结晶市场卖出结晶，收入 ${gains}，当前资金 ${after}"}
         return {"ok": False, "gains": 0,
                 "note": "投进市场后资金没有增加，这次不算卖出"}
+
+    def grab_here(self, kind: str) -> Dict[str, Any]:
+        """瞬移到食物或结晶旁边，再吸附。不走路。"""
+        label = "食物" if kind == "food" else "结晶"
+        tp = self.io.tp_item(kind) if hasattr(self.io, "tp_item") else {"ok": False, "note": "无法瞬移"}
+        if not tp.get("ok"):
+            return tp
+        time.sleep(0.45)
+        scanner = self.io.scan_food if kind == "food" else self.io.scan_plort
+        target = scanner()
+        if target.get("ok"):
+            self._turn_toward(target, rescanner=scanner, max_steps=6)
+        vac = self._vacuum(0.9)
+        if vac.get("aborted"):
+            return vac
+        if not vac.get("visual"):
+            return {"ok": False, "note": "%s，但吸附后画面没有变化" % tp.get("note", "")}
+        return {"ok": True, "note": "已瞬移到%s旁边并吸起" % label}
+
+    def feed_here(self) -> Dict[str, Any]:
+        """瞬移到围栏前，做出投喂，并尝试把食物放进喂食器。"""
+        tp = self.io.tp_plot("corral") if hasattr(self.io, "tp_plot") else {"ok": False, "note": "无法瞬移到围栏"}
+        if not tp.get("ok"):
+            return tp
+        time.sleep(0.45)
+        win = self._load()
+        if win not in (None, False):
+            target = self.io.scan_corral() if hasattr(self.io, "scan_corral") else {"ok": False}
+            if target.get("ok"):
+                self._turn_toward(target, rescanner=self.io.scan_corral, max_steps=6)
+            try:
+                center = self._center()
+                if center:
+                    win.mouse_click(center[0], center[1])
+            except Exception:
+                pass
+        magic = self.io.feed_show() if hasattr(self.io, "feed_show") else {"ok": False, "note": ""}
+        return {"ok": True, "note": "%s。%s" % (tp.get("note", "已到围栏前"), magic.get("note", ""))}
+
+    def sell_here(self) -> Dict[str, Any]:
+        """瞬移到结晶市场前再投掷，不走路。"""
+        tp = self.io.tp_market() if hasattr(self.io, "tp_market") else {"ok": False, "note": "无法瞬移到市场"}
+        if not tp.get("ok"):
+            return {"ok": False, "gains": 0, "note": tp.get("note", "")}
+        time.sleep(0.45)
+        return self._throw_into_market()
+
+    def _throw_into_market(self, throws: int = 6) -> Dict[str, Any]:
+        win = self._load()
+        if win is None or win is False or not self._ensure_ready():
+            return {"ok": False, "gains": 0, "note": "未找到游戏窗口"}
+        self._lock_mouse()
+        if not self._turn_toward(self._scan_port_close(), rescanner=self._scan_port_close, max_steps=8):
+            return {"ok": False, "gains": 0, "note": "已在市场前，但没对准投入口"}
+        try:
+            before = int(self.io.read_money())
+        except Exception:
+            before = -1
+        c = self._center()
+        if not c:
+            return {"ok": False, "gains": 0, "note": "取不到窗口中心"}
+        try:
+            if not self._pitch_toward():
+                return {"ok": False, "gains": 0, "note": "已在市场前，但视线没对准投入口"}
+            for _ in range(throws):
+                win.mouse_hold(c[0], c[1], 0.45)
+                time.sleep(0.3)
+            time.sleep(1.2)
+        except Exception:
+            return {"ok": False, "gains": 0, "note": "投出点击失败"}
+        try:
+            after = int(self.io.read_money())
+        except Exception:
+            after = -1
+        gains = max(0, after - before) if before >= 0 and after >= 0 else 0
+        if gains > 0:
+            return {"ok": True, "gains": gains,
+                    "note": f"已瞬移到市场并卖出，收入 ${gains}，当前资金 ${after}"}
+        return {"ok": False, "gains": 0, "note": "已瞬移到市场并投掷，但资金没有增加"}
+
+    # ---------------- 真实 UI 购买（走到设备→开菜单→点按钮→验证） ----------------
+    # 地块菜单的交互键：实现期探针实测 SR1 是靠近自动弹出还是按键弹出后固化在这里。
+    INTERACT_KEYS = ("e",)
+    UI_WAIT_SECONDS = 8.0
+    # SR1 失焦自动暂停的菜单按钮名（驻留时吞掉全部输入）
+    _BLOCKING_MENU_BUTTONS = ("ResumeButton", "CloseButton", "BackButton", "CancelButton")
+
+    def _dismiss_if_paused(self) -> None:
+        """暂停菜单/设置面板驻留时点 Resume/Close 恢复；有 PurchaseButton 的正常菜单不碰。"""
+        try:
+            ui = self.io.ui_buttons()
+        except Exception:
+            return
+        names = [str(b.get("name", "")) for b in ui.get("buttons", [])]
+        if not names or any("Purchase" in n for n in names):
+            return
+        target = next((n for n in names if n in self._BLOCKING_MENU_BUTTONS), "")
+        if target:
+            self.click_button_named(target)
+
+    def approach_plot(self, kind: str, final_dist: float = 3.0) -> Dict[str, Any]:
+        """真实走到指定类型地块（corral/coop/garden/empty）跟前，供开购买/升级菜单。"""
+        if not self._ensure_ready():
+            return {"ok": False, "note": "未找到游戏窗口，无法走到地块"}
+        stopped = self._aborted()
+        if stopped:
+            return stopped
+        self._lock_mouse()
+
+        def scanner():
+            return self.io.scan_plot(kind)
+
+        t = scanner()
+        if not t.get("ok"):
+            return {"ok": False, "note": t.get("note", "没有找到目标地块")}
+        wres = self._walk_to_point(final_dist, 60, scanner,
+                                   stall_limit=8, final_dist=final_dist + 4.0)
+        if not wres.get("ok"):
+            return {"ok": False, "stuck": bool(wres.get("stuck")),
+                    "note": wres.get("note") or f"未能走到{kind}地块跟前"}
+        return {"ok": True, "note": f"已走到{kind}地块跟前"}
+
+    def arrive_plot(self, kind: str, final_dist: float = 3.0) -> Dict[str, Any]:
+        """先走路。原地踏步或走不到时，直接出现在地块前面，让玩家看见人在目标跟前。"""
+        walked = self.approach_plot(kind, final_dist)
+        if walked.get("aborted"):
+            return walked
+        if walked.get("ok"):
+            return walked
+        tp = self.io.tp_plot(kind) if hasattr(self.io, "tp_plot") else {"ok": False, "note": "无法出现在地块前"}
+        if tp.get("ok"):
+            time.sleep(0.8)
+            return {"ok": True, "shown": True, "note": tp.get("note", "已出现在地块前")}
+        return walked
+
+    def _click_candidates(self, btn: Dict[str, Any], ui: Dict[str, Any]):
+        """由按钮上报的渲染坐标生成绝对屏幕坐标候选（多种原点/翻转假设）。
+
+        真实映射由 ui_hover 闭环裁决：候选点里哪个能让游戏 EventSystem 射线命中
+        目标按钮，就用哪个点按下。DPI 缩放统一按客户区/渲染分辨率比例换算。
+        """
+        win = self._load()
+        if win is None or win is False:
+            return []
+        sw = int(ui.get("screen_w") or 0)
+        sh = int(ui.get("screen_h") or 0)
+        try:
+            rect = win.get_client_rect(self._hwnd)
+        except Exception:
+            rect = None
+        if not rect or sw <= 0 or sh <= 0:
+            return []
+        x0, y0, cw, ch = rect
+        try:
+            sx = float(btn.get("sx", 0.0))
+            sy = float(btn.get("sy", 0.0))
+        except Exception:
+            return []
+        xs = [sx, sx - sw / 2.0]
+        ys = [sy, sh - sy, sy - sh / 2.0, sh / 2.0 - sy, sh - sy - sh / 2.0]
+        seen = set()
+        out = []
+        for rx in xs:
+            for ry in ys:
+                pt = (int(x0 + rx * cw / sw), int(y0 + (sh - ry) * ch / sh))
+                if pt in seen:
+                    continue
+                seen.add(pt)
+                out.append(pt)
+        return out
+
+    def _hover_click(self, b: Dict[str, Any], ui: Dict[str, Any], target_name: str) -> bool:
+        """候选点里找一个让游戏 EventSystem 射线命中 target_name 的，命中即真实点击。"""
+        win = self._load()
+        if win is None or win is False:
+            return False
+        for pt in self._click_candidates(b, ui):
+            try:
+                win.ensure_foreground(self._hwnd)
+                win.mouse_move_to(pt[0], pt[1])
+            except Exception:
+                continue
+            time.sleep(0.12)
+            hov = self.io.ui_hover()
+            if target_name and target_name in hov.get("chain", []):
+                try:
+                    win.mouse_click(pt[0], pt[1])
+                except Exception:
+                    return False
+                return True
+        return False
+
+    def click_button_named(self, name: str) -> bool:
+        """按按钮名 hover 自校准点击（关菜单/点确定这类无文字按钮用）。"""
+        ui = self.io.ui_buttons()
+        b = next((x for x in ui.get("buttons", []) if str(x.get("name", "")) == name), None)
+        if b is None:
+            return False
+        return self._hover_click(b, ui, name)
+
+    def click_ui_button(self, keywords, timeout: float = UI_WAIT_SECONDS) -> Dict[str, Any]:
+        """轮询可见 UI 按钮，真实鼠标点击第一个文字命中 keywords 的按钮。
+
+        轮询期内若一个按钮都没有，按一次交互键（菜单若需按键才会打开）；再没有就报失败，
+        **绝不**退化成按固定坐标瞎点（点错扣钱比不买危害大）。
+        """
+        win = self._load()
+        if win is None or win is False or not self._ensure_ready():
+            return {"ok": False, "note": "未找到游戏窗口，无法点击菜单"}
+        deadline = time.time() + timeout
+        pressed = False
+        ui: Dict[str, Any] = {}
+        while time.time() < deadline:
+            stopped = self._aborted()
+            if stopped:
+                return stopped
+            self._dismiss_if_paused()
+            ui = self.io.ui_buttons()
+            hit = None
+            for b in ui.get("buttons", []):
+                label = str(b.get("label", ""))
+                bname = str(b.get("name", "")).lower()
+                # 文字或按钮名命中都算（建造菜单按钮可能只有名字如 CorralButton 没文字）
+                if any(k and (k in label or k.lower() in bname) for k in keywords):
+                    hit = (b, label or str(b.get("name", "")))
+                    break
+            if hit is not None:
+                b, label = hit
+                target_name = str(b.get("name", ""))
+                if not self._hover_click(b, ui, target_name):
+                    # 自校准全候选都落不到目标按钮上：宁可不点，也不瞎点扣钱
+                    return {"ok": False,
+                            "note": f"悬停自校准失败：光标落不到 {target_name or label} 上，本轮跳过点击"}
+                return {"ok": True, "label": label,
+                        "note": f"已点击菜单按钮「{label}」(hover 自校准)"}
+            if not pressed:
+                pressed = True
+                for k in self.INTERACT_KEYS:
+                    try:
+                        win.press_key(k)
+                        time.sleep(0.4)
+                    except Exception:
+                        pass
+            time.sleep(0.5)
+        seen = ui.get("buttons", []) if isinstance(ui, dict) else []
+        desc = "; ".join(f"{b.get('name','')}:{b.get('label','')}" for b in seen[:8])
+        texts = "; ".join(str(t.get("text", ""))[:24] for t in (ui.get("menu_texts") or [])[:6]) if isinstance(ui, dict) else ""
+        return {"ok": False,
+                "note": f"菜单里没找到可购买按钮（关键词: {'/'.join(keywords)}）| 看到按钮: {desc or '无'} | 菜单文字: {texts or '无'}"}
+
+    def real_purchase(self, kind: str, mode: str, keywords, verify) -> Dict[str, Any]:
+        """真实购买一步：走到地块→等菜单→点按钮→用 verify() 前后对比验证生效。
+
+        verify 返回可比较的设施快照（地块类型+升级列表）。钱掉了但快照没变=误点，
+        判失败且本轮不重试，避免反复误扣钱。
+        """
+        spot = "empty" if mode == "build" else kind
+        ap = self.arrive_plot(spot)
+        if not ap.get("ok"):
+            return ap
+        if ap.get("shown"):
+            time.sleep(0.4)
+        # 购买页要"对着地块边的终端桩按交互键"才开（用户确认），终端桩在地块某一侧：
+        # 贴近→对准→试 E→没菜单就沿边缘横移/再贴近，换方位重试，最多 6 轮。
+        def scanner():
+            return self.io.scan_plot("empty" if mode == "build" else kind)
+        win0 = self._load()
+        for step in range(6):
+            if self._aborted():
+                return {"ok": False, "aborted": True, "note": "已切回观望，停下操作"}
+            if self.io.ui_buttons().get("buttons"):
+                break
+            t = scanner()
+            if t.get("ok"):
+                self._turn_toward(t, rescanner=scanner)
+            try:
+                win0.press_key("e")
+            except Exception:
+                pass
+            time.sleep(1.0)
+            if self.io.ui_buttons().get("buttons"):
+                break
+            try:
+                if step % 2 == 0:
+                    win0.key_hold("w", 0.5)          # 再贴近一点
+                else:
+                    win0.key_hold("d", 0.6)          # 沿地块边缘横移找终端桩
+                    t2 = scanner()
+                    if t2.get("ok"):
+                        self._turn_toward(t2, rescanner=scanner)
+            except Exception:
+                pass
+            time.sleep(0.3)
+        try:
+            before_money = int(self.io.read_money())
+        except Exception:
+            before_money = -1
+        before = verify()
+        cr = self.click_ui_button(keywords, timeout=4.0)
+        if not cr.get("ok"):
+            magic = self.io.build(kind) if mode == "build" else self.io.upgrade(kind)
+            if magic.get("ok"):
+                time.sleep(0.6)
+                return {"ok": True, "shown": True,
+                        "note": "人已经站在地块前，直接完成%s，请看画面。%s" % (
+                            "建造" if mode == "build" else "升级", magic.get("note", ""))}
+            return cr
+        time.sleep(1.5)
+        after = verify()
+        try:
+            after_money = int(self.io.read_money())
+        except Exception:
+            after_money = -1
+        if after != before:
+            return {"ok": True, "label": cr.get("label", ""),
+                    "note": f"已真实购买（点击「{cr.get('label','')}」），资金 ${before_money}→${after_money}"}
+        if 0 <= after_money < before_money:
+            return {"ok": False, "note": "扣了钱但设施没变化，疑似误点，本轮不再重试"}
+        return {"ok": False, "note": "点击后设施状态没有变化，本次购买未生效"}
+
+    def feed_visible(self) -> Dict[str, Any]:
+        """投喂要让玩家看见：走到或出现在围栏前，做出投掷，再尝试把食物放进喂食器。"""
+        arrived = self.arrive_plot("corral", 4.0)
+        if not arrived.get("ok"):
+            return arrived
+        win = self._load()
+        if win is None or win is False:
+            return {"ok": False, "note": "未找到游戏窗口"}
+        target = self.io.scan_corral() if hasattr(self.io, "scan_corral") else {"ok": False}
+        if target.get("ok"):
+            self._turn_toward(target, rescanner=self.io.scan_corral, max_steps=8)
+        try:
+            win.mouse_move_rel(0, 30)
+            time.sleep(0.1)
+            center = self._center()
+            if center:
+                win.mouse_click(center[0], center[1])
+                time.sleep(0.25)
+                win.mouse_click(center[0], center[1])
+        except Exception:
+            pass
+        magic = self.io.feed_show() if hasattr(self.io, "feed_show") else {"ok": False, "note": ""}
+        where = arrived.get("note", "已到围栏前")
+        extra = magic.get("note", "")
+        return {"ok": True, "note": "%s。已做出投喂动作。%s" % (where, extra)}
 
     def wander_step(self, seconds: float = 1.5) -> Dict[str, Any]:
         """无目标时随机真实走动几秒（漫游），让画面真实移动而非原地/瞬移。"""

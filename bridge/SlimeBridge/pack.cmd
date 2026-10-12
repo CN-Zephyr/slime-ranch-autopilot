@@ -25,10 +25,10 @@ if not exist "%DLL%" (
 )
 echo [2/2] packed: %DLL%
 echo.
-echo 下一步（UMF 加载）：
-echo  1. 用 UMF 安装器把 UMF 装进史莱姆牧场目录。
-echo  2. 用 UMF 的 Mod Builder / Mod Maker 把本工程(SlimeBridge)打包成 .umfmod。
-echo  3. 把生成的 .umfmod 放到 <游戏目录>\uModFramework\Mods\ 下。
-echo  4. 启动游戏，控制台应输出 "[SlimeBridge] HTTP server listening ..."。
-echo  5. 浏览器/浏览器访问 http://127.0.0.1:8124/api/health 验证存活。
+echo 下一步（本机实际加载方式：UnityCoreMod / SRMP.dll）：
+echo  1. 完全退出《史莱姆牧场》。
+echo  2. 复制 %DLL% 到 ^<游戏目录^>\Mods\SlimeBridge.dll（覆盖旧版）。
+echo  3. 启动游戏进存档，控制台/日志应出现 "[SlimeBridge] HTTP server listening ..."。
+echo  4. 浏览器访问 http://127.0.0.1:8124/api/health 验证存活与 features 清单。
+echo  （BUILD.md 里的 UMF/.umfmod 流程为历史文档；本机 Mods\ 直载是唯一在用的通路。）
 endlocal
