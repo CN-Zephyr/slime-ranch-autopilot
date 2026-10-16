@@ -296,11 +296,11 @@ def ensure_foreground(hwnd: int) -> bool:
 
 # ------------------------------------------------------------------ 截屏（GDI，纯 ctypes）
 def capture_window(hwnd: int) -> Optional[Image.Image]:
-    """用 GDI BitBlt 抓取窗口客户区图像（含边框）。失败返回 None。"""
-    rect = wintypes.RECT()
-    if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+    """抓取窗口客户区。点击和截图都用客户区，避免把标题栏算进画面。"""
+    client = get_client_rect(hwnd)
+    if not client:
         return None
-    w, h = rect.right - rect.left, rect.bottom - rect.top
+    x, y, w, h = client
     if w <= 0 or h <= 0:
         return None
 
@@ -309,7 +309,7 @@ def capture_window(hwnd: int) -> Optional[Image.Image]:
     try:
         bmp = gdi32.CreateCompatibleBitmap(hdc_screen, w, h)
         gdi32.SelectObject(hdc_mem, bmp)
-        gdi32.BitBlt(hdc_mem, 0, 0, w, h, hdc_screen, rect.left, rect.top, 0x00CC0020)  # SRCCOPY
+        gdi32.BitBlt(hdc_mem, 0, 0, w, h, hdc_screen, x, y, 0x00CC0020)  # SRCCOPY
 
         # 复制到缓冲
         class _BMPHEADER(ctypes.Structure):

@@ -55,6 +55,9 @@ class Brain:
         self._said: dict[str, tuple[str, int]] = {}
         self._overlay_last = ""
         self._sell_pending = False   # 背包里还有没卖掉的结晶（上轮售卖失败）
+        self._drone_checked = False
+        self._drones_on = False
+        self._corral_i = 0
         self._hotkey = HotkeyListener(on_toggle=self._on_hotkey)
         # 后端选择
         if settings.backend == "live" and os.path.exists(settings.game_exe):
@@ -123,6 +126,8 @@ class Brain:
         self.mode = mode
         self._market_ready = False
         self._reset_fails = 0
+        self._drone_checked = False
+        self._drones_on = False
         self._said.clear()
         if self.walk:
             if mode == "ranch":
@@ -184,6 +189,7 @@ class Brain:
         if self.mode != "ranch":
             return
         self._maybe_dismiss_blocking_menu()
+        self._maybe_autosave()
         if not self._market_ready:
             self._reset_to_market()
             return
@@ -193,6 +199,16 @@ class Brain:
                 self._say("feed-skip", f"【自主】投喂未完成：{fed.get('note', '')}", every=4)
             self._gather_and_sell()
             self._infra_step()
+            return
+        if not self._drone_checked:
+            self._drone_checked = True
+            setup = self.io.drone_setup() if hasattr(self.io, "drone_setup") else {"ok": False, "note": ""}
+            self._drones_on = bool(setup.get("ok"))
+            if setup.get("note"):
+                self._say("drone", f"【自主】{setup.get('note')}", every=1)
+        if self._drones_on:
+            if self.ticks % 5 == 4:
+                self._infra_step()
             return
         step = self.ticks % 5
         if step == 0:
@@ -273,8 +289,9 @@ class Brain:
             self._say(f"build-{kind}", f"【自主】{tp.get('note', '找不到地块')}", every=4)
             return
         time.sleep(0.6)
-        magic = self.io.build(kind) if mode == "build" else self.io.upgrade(kind)
-        if magic.get("ok"):
+        keywords = BUILD_KEYWORDS.get(kind, []) if mode == "build" else UPGRADE_KEYWORDS
+        res = self.walk.real_purchase(kind, mode, keywords, self._facilities_signature)
+        if res.get("ok"):
             if hasattr(self.io, "scan_facilities"):
                 self._sync_ranch_from_facilities()
             new_level = self.ranch.level.get(kind, 0)
@@ -283,11 +300,19 @@ class Brain:
             verb = "建造了" if mode == "build" else "升级了"
             self.c.report_discovery(
                 f"{kind}-lv{new_level}-{self.ticks}",
-                f"已瞬移到{name}前并{verb}，{magic.get('note', '')}",
+                f"已在{name}前{verb}，{res.get('note', '')}",
             )
         else:
             act = "建造" if mode == "build" else "升级"
-            self._say(f"build-{kind}", f"【自主】已在地块前，{act}未成功：{magic.get('note', '')}", every=4)
+            self._say(f"build-{kind}", f"【自主】已在地块前，{act}未成功：{res.get('note', '')}", every=4)
+
+    def _maybe_autosave(self) -> None:
+        """每 8 轮主动存一次，避免退出时存档被打断。"""
+        if self.ticks % 8 != 0 or not hasattr(self.io, "save_now"):
+            return
+        saved = self.io.save_now()
+        if saved.get("ok"):
+            self._say("save", f"【自主】{saved.get('note', '已主动存档')}", every=8)
 
     def _gather_and_sell(self) -> None:
         # 混合模式：钱必须来自真实动作。mod 的 harvest/sell 是"凭空注入结晶/兑换资金"

@@ -570,7 +570,8 @@ class WalkCaptureIO:
     def feed_here(self) -> Dict[str, Any]:
         """瞬移到围栏前、镜头真实对准（画面可见），食物以真实物理投进围栏。"""
         self._dismiss_if_paused()
-        tp = self.io.tp_plot("corral") if hasattr(self.io, "tp_plot") else {"ok": False, "note": "无法瞬移到围栏"}
+        tp = self.io.tp_plot("corral@%d" % getattr(self, "_corral_i", 0)) if hasattr(self.io, "tp_plot") else {"ok": False, "note": "无法瞬移到围栏"}
+        self._corral_i = getattr(self, "_corral_i", 0) + 1
         if not tp.get("ok"):
             return tp
         time.sleep(0.45)
@@ -884,6 +885,9 @@ class WalkCaptureIO:
         except Exception:
             before_money = -1
         before = verify()
+        picked = self._select_menu_item(kind, mode)
+        if picked.get("ok"):
+            time.sleep(0.4)
         cr = self.click_ui_button(keywords, timeout=4.0)
         if not cr.get("ok"):
             magic = self.io.build(kind) if mode == "build" else self.io.upgrade(kind)
@@ -905,6 +909,42 @@ class WalkCaptureIO:
         if 0 <= after_money < before_money:
             return {"ok": False, "note": "扣了钱但设施没变化，疑似误点，本轮不再重试"}
         return {"ok": False, "note": "点击后设施状态没有变化，本次购买未生效"}
+
+    def _select_menu_item(self, kind: str, mode: str) -> Dict[str, Any]:
+        """建造/升级页上的设施项是 TMP 文字。先按文字点一下，再点购买。"""
+        if mode == "build":
+            needles = {
+                "corral": ["Corral", "围栏", "畜栏"],
+                "coop": ["Coop", "鸡舍", "鸡圈"],
+                "garden": ["Garden", "菜园", "花园"],
+            }.get(kind, [])
+        else:
+            needles = {
+                "corral": ["Plort Collector", "结晶收集", "Collector"],
+                "coop": ["Feeder", "喂食", "食槽"],
+                "garden": ["Sprinkler", "喷灌", "喷洒"],
+            }.get(kind, [])
+        ui = self.io.ui_buttons() if hasattr(self.io, "ui_buttons") else {}
+        win = self._load()
+        for item in ui.get("menu_texts") or []:
+            text = str(item.get("text") or "")
+            low = text.lower()
+            if not any(n.lower() in low for n in needles):
+                continue
+            if item.get("sx") is None or item.get("sy") is None:
+                continue
+            fake = {"sx": item.get("sx"), "sy": item.get("sy"), "w": 80, "h": 28,
+                    "name": str(item.get("obj") or "")}
+            if self._hover_click(fake, ui, fake["name"]):
+                return {"ok": True, "note": text}
+            pts = list(self._click_candidates(fake, ui))
+            if pts and win not in (None, False):
+                try:
+                    win.mouse_click(pts[0][0], pts[0][1])
+                    return {"ok": True, "note": text}
+                except Exception:
+                    pass
+        return {"ok": False, "note": "菜单里没有对应的设施项"}
 
     def feed_visible(self) -> Dict[str, Any]:
         """投喂要让玩家看见：走到或出现在围栏前，做出投掷，再尝试把食物放进喂食器。"""

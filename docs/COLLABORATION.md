@@ -5,6 +5,45 @@
 
 ---
 
+## TODO（规划中 / 待认领）
+
+按优先级排序，认领后在条目后加 `@你的名字`。
+
+### 事务性
+
+- [x] **推送积压提交**：清单随本次提交进入 `main`。作者机器上若还留着未推送的 `8b63b71`，先 `git pull` 再推，避免和这次提交分叉
+- [x] **清理远程旧分支**：`feat/real-ui-ranch-loop`（PR #2 已合并）
+
+### P0 —— 下一个大特性
+
+- [x] **无人机搬运网络**（代码已接上，未实机验证）
+  - `drone_setup`：场景里已有无人机就写程序；没有就用 `GetGadgetDefinition(DRONE)` 放一台。程序按 `source/destination/target` 写围栏→市场、菜园→喂食器
+  - 自主经营：布置成功后日常搬运交给无人机，人只在建造/升级时出场；布置失败就继续自己瞬移收菜
+  - 还差一次活体确认：7Zee 未解锁时定义是否为 null、程序槽字段是否写进了正在飞的那台
+
+### P1 —— 稳定性打磨
+
+- [x] **自动保存常态化**：每 8 轮经营调用 `save_now`
+- [x] **outbox 重放修复**：插件启动时把旧 `outbox.jsonl` 挪成 `outbox.prev.jsonl`
+- [x] **视觉层修复**：`capture_window` 改为抓客户区，和点击用同一套矩形
+- [x] **建造菜单设施切换**：`menu_texts` 带上 sx/sy，购买前按文字点对应设施/升级件。点击链路未实机走查
+
+### P2 —— 体验改进
+
+- [x] **升级页多升级件选择**：升级前先点结晶收集器 / 喂食器 / 喷灌对应的文字项，再点购买。未实机验证
+- [ ] **多围栏/多史莱姆种类支持**：投喂会按 `corral@0`、`corral@1` 轮流换围栏。按史莱姆种类配不同食物还没做
+- [x] **`feed_show` 的 Feeder 反射写入**：note 里回报实际调用的 `MaybeAddToSlot` 参数类型；调用异常会记失败
+- [x] **诊断脚本清理**：`diag_*.py`、`_probe_*.py` 移入 `tools/`
+- [x] **英文文档**：`docs/COLLABORATION.en.md`、`docs/guide.en.md`
+- [x] **CI**：`.github/workflows/tests.yml` 跑 `unittest discover`
+
+### 已知未修（记录在案暂不处理）
+
+- `GetSystemMetrics` 多显示器场景未验证（当前单屏 1280×800 实测通过）
+- `_walk_to_point` 的走路路径仍保留（瞬移策略为主），真实走路仅在 `approach_market` 等处兜底
+
+---
+
 ## 一、仓库内容总览（全部可分发）
 
 ```
@@ -42,7 +81,7 @@ slime-ranch-autopilot/
 ├── run_standalone.py        # 脱离 NEKO 独立跑核心（SIM/live）
 ├── plugin_check.py          # plugin.toml 契约自检
 ├── DESIGN.md / README.md    # 设计文档 / 项目说明
-└── diag_*.py, _probe_*.py   # 诊断脚本（围栏走位/售卖/桥接探测）
+└── diag_*.py, _probe_*.py   # 诊断脚本，已移到 tools/
 ```
 
 ## 二、分发渠道与形态

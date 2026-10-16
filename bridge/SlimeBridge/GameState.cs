@@ -551,6 +551,7 @@ namespace SlimeBridge
                             case "tp_plot": TeleportPlotReal(kind, ar); break;
                             case "tp_item": TeleportItemReal(kind, ar); break;
                             case "feed_show": FeedShowReal(ar); break;
+                            case "drone_setup": DroneSetupReal(ar); break;
                             case "debug_types": DebugTypesReal(kind, ar); break;
                             case "debug_cams": DebugCamsReal(ar); break;
                             case "debug_members": DebugMembersReal(kind, ar); break;
@@ -1111,13 +1112,20 @@ namespace SlimeBridge
             if (_player == null) { ar.ok = false; ar.note = "未进入存档"; return; }
             try
             {
+                int pick = 0;
+                if (!string.IsNullOrEmpty(kind))
+                {
+                    int at = kind.IndexOf('@');
+                    if (at > 0)
+                    {
+                        int.TryParse(kind.Substring(at + 1), out pick);
+                        kind = kind.Substring(0, at);
+                    }
+                }
                 bool wantEmpty = kind == "empty";
                 LandPlot.Id want = KindToPlotId(kind);
                 Vector3 p = _player.transform.position;
-                LandPlot best = null;
-                float bestD = float.MaxValue;
-                bool bestEmpty = false;
-                string bestUpgrades = "[]";
+                var hits = new List<LandPlot>();
                 foreach (var lp in UnityEngine.Object.FindObjectsOfType<LandPlot>())
                 {
                     if (lp == null) continue;
@@ -1126,11 +1134,26 @@ namespace SlimeBridge
                     bool isEmpty = (m.typeId == LandPlot.Id.NONE || m.typeId == LandPlot.Id.EMPTY);
                     if (wantEmpty) { if (!isEmpty) continue; }
                     else if (isEmpty || m.typeId != want) continue;
-                    float d = Vector3.Distance(p, lp.transform.position);
-                    if (d < bestD)
-                    {
-                        bestD = d; best = lp; bestEmpty = isEmpty; bestUpgrades = UpgradesJson(lp);
-                    }
+                    hits.Add(lp);
+                }
+                hits.Sort(delegate(LandPlot a, LandPlot b)
+                {
+                    float da = Vector3.Distance(p, a.transform.position);
+                    float db = Vector3.Distance(p, b.transform.position);
+                    return da.CompareTo(db);
+                });
+                LandPlot best = null;
+                float bestD = float.MaxValue;
+                bool bestEmpty = false;
+                string bestUpgrades = "[]";
+                if (hits.Count > 0)
+                {
+                    if (pick < 0) pick = 0;
+                    best = hits[pick % hits.Count];
+                    bestD = Vector3.Distance(p, best.transform.position);
+                    LandPlotModel bm = PlotModelOf(best);
+                    bestEmpty = bm != null && (bm.typeId == LandPlot.Id.NONE || bm.typeId == LandPlot.Id.EMPTY);
+                    bestUpgrades = UpgradesJson(best);
                 }
                 if (best == null)
                 {
@@ -1318,8 +1341,12 @@ namespace SlimeBridge
                         if (string.IsNullOrEmpty(txt)) continue;
                         if (tn > 0) textsSb.Append(',');
                         tn++;
+                        var trt = c.GetComponent<RectTransform>();
+                        Vector3 tsp = trt != null ? trt.position : Vector3.zero;
                         textsSb.Append("{\"obj\":").Append(SimpleJson.Esc(c.gameObject.name))
                                .Append(",\"text\":").Append(SimpleJson.Esc(txt.Replace("\n", " ")))
+                               .Append(",\"sx\":").Append(tsp.x.ToString("F1", CultureInfo.InvariantCulture))
+                               .Append(",\"sy\":").Append(tsp.y.ToString("F1", CultureInfo.InvariantCulture))
                                .Append('}');
                         if (tn >= 12) break;
                     }
@@ -1643,7 +1670,6 @@ namespace SlimeBridge
                 return;
             }
             RunOnMain(() => StandAt(plot.transform.position));
-            bool fed = false;
             try
             {
                 var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;
@@ -1659,16 +1685,34 @@ namespace SlimeBridge
                     var add = ammo.GetType().GetMethod("MaybeAddToSlot", flags);
                     if (add == null) continue;
                     var ps = add.GetParameters();
+                    var sig = new System.Text.StringBuilder();
+                    foreach (var p in ps)
+                    {
+                        if (sig.Length > 0) sig.Append(",");
+                        sig.Append(p.ParameterType.Name);
+                    }
                     object[] args = ps.Length >= 2 ? new object[] { foodId, null } : new object[] { foodId };
                     if (ps.Length >= 3) args = new object[] { foodId, null, 6 };
-                    RunOnMain(() => add.Invoke(ammo, args));
-                    fed = true;
-                    break;
+                    Exception invokeErr = null;
+                    RunOnMain(() =>
+                    {
+                        try { add.Invoke(ammo, args); }
+                        catch (Exception e) { invokeErr = e; }
+                    });
+                    if (invokeErr != null)
+                    {
+                        ar.ok = false;
+                        ar.note = "MaybeAddToSlot(" + sig + ") 调用失败: " + invokeErr.GetBaseException().Message;
+                        return;
+                    }
+                    ar.ok = true;
+                    ar.note = "已站在围栏前，MaybeAddToSlot(" + sig + ") 已写入喂食器";
+                    return;
                 }
             }
             catch (Exception e) { UMFLog.Log("[SlimeBridge] feed show err: " + e.Message); }
             ar.ok = true;
-            ar.note = fed ? "已站在围栏前，食物放进了喂食器" : "已站在围栏前，准备投喂";
+            ar.note = "已站在围栏前，准备投喂（没找到喂食器的 MaybeAddToSlot）";
         }
 
         // ---- 建造（真实：直接走游戏原生购买链路）----
@@ -1793,6 +1837,198 @@ namespace SlimeBridge
                 ? "已升级 " + kind + "（" + up + "），花费约 $" + cost + "，当前资金 $" + ReadMoneyReal() + "（真实）"
                 : "升级失败（已升满？），已退回资金 " + cost;
             if (!ok) AddCurrencyReal(cost);
+        }
+
+        // 给牧场上的无人机写搬运程序。没有无人机时尝试放一台。
+        // 程序槽的真实字段要等活体无人机才能完全对上，这里按侦察到的
+        // DroneProgramV01{target,source,destination} 和 Source/Destination 类型名去写。
+        private void DroneSetupReal(ActionResult ar)
+        {
+            EnsureScene();
+            if (_player == null) { ar.ok = false; ar.note = "未进入存档"; return; }
+            int n = ProgramExistingDrones();
+            if (n > 0)
+            {
+                ar.ok = true;
+                ar.note = "已给 " + n + " 台无人机写上搬运程序（围栏→市场，菜园→喂食器）。未实机验证";
+                return;
+            }
+            if (!TrySpawnOneDrone(ar))
+            {
+                ar.ok = false;
+                if (string.IsNullOrEmpty(ar.note)) ar.note = "牧场上没有无人机";
+                return;
+            }
+            n = ProgramExistingDrones();
+            ar.ok = n > 0;
+            ar.note = n > 0
+                ? "已放下一台无人机并写入搬运程序。未实机验证"
+                : "无人机放下来了，但程序槽没写上。未实机验证";
+        }
+
+        private int ProgramExistingDrones()
+        {
+            System.Type droneType = FindGameType("DroneGadget");
+            if (droneType == null) return 0;
+            UnityEngine.Object[] live = null;
+            try { live = UnityEngine.Object.FindObjectsOfType(droneType); }
+            catch (Exception) { return 0; }
+            if (live == null || live.Length == 0) return 0;
+            int n = 0;
+            foreach (var obj in live)
+            {
+                if (obj != null && ProgramOneDrone(obj)) n++;
+            }
+            return n;
+        }
+
+        private bool ProgramOneDrone(UnityEngine.Object obj)
+        {
+            var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;
+            bool wrote = false;
+            foreach (var f in obj.GetType().GetFields(flags))
+            {
+                if (f.Name.IndexOf("rogram", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                object val = null;
+                try { val = f.GetValue(obj); } catch (Exception) { continue; }
+                if (val == null) continue;
+                var arr = val as System.Array;
+                if (arr == null) continue;
+                for (int i = 0; i < arr.Length && i < 2; i++)
+                {
+                    object slot = arr.GetValue(i);
+                    if (slot == null && arr.GetType().GetElementType() != null && !arr.GetType().GetElementType().IsAbstract)
+                    {
+                        try { slot = Activator.CreateInstance(arr.GetType().GetElementType()); arr.SetValue(slot, i); }
+                        catch (Exception) { slot = null; }
+                    }
+                    if (slot != null && FillDroneProgram(slot, i)) wrote = true;
+                }
+            }
+            return wrote;
+        }
+
+        private bool FillDroneProgram(object slot, int index)
+        {
+            var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;
+            string sourceName = index == 0 ? "DroneProgramSourceCorral" : "DroneProgramSourceGarden";
+            string destName = index == 0 ? "DroneProgramDestinationPlortMarket" : "DroneProgramDestinationFeeder";
+            string target = index == 0 ? "PINK_PLORT" : "CARROT_VEGGIE";
+            bool wrote = false;
+            foreach (var f in slot.GetType().GetFields(flags))
+            {
+                string n = f.Name.ToLowerInvariant();
+                try
+                {
+                    if (f.FieldType == typeof(string))
+                    {
+                        if (n.IndexOf("source") >= 0) { f.SetValue(slot, sourceName); wrote = true; }
+                        else if (n.IndexOf("dest") >= 0) { f.SetValue(slot, destName); wrote = true; }
+                        else if (n.IndexOf("target") >= 0) { f.SetValue(slot, target); wrote = true; }
+                    }
+                    else if (n.IndexOf("source") >= 0 || n.IndexOf("dest") >= 0)
+                    {
+                        string typeName = n.IndexOf("source") >= 0 ? sourceName : destName;
+                        object created = CreateGameType(typeName);
+                        if (created != null && f.FieldType.IsInstanceOfType(created))
+                        {
+                            f.SetValue(slot, created);
+                            wrote = true;
+                        }
+                    }
+                }
+                catch (Exception) { }
+            }
+            return wrote;
+        }
+
+        private object CreateGameType(string name)
+        {
+            System.Type t = FindGameType(name);
+            if (t == null || t.IsAbstract) return null;
+            try { return Activator.CreateInstance(t); }
+            catch (Exception) { return null; }
+        }
+
+        private System.Type FindGameType(string name)
+        {
+            var asm = typeof(LandPlot).Assembly;
+            try
+            {
+                foreach (var t in asm.GetTypes())
+                    if (t != null && t.Name == name) return t;
+            }
+            catch (System.Reflection.ReflectionTypeLoadException ex)
+            {
+                if (ex.Types == null) return null;
+                foreach (var t in ex.Types)
+                    if (t != null && t.Name == name) return t;
+            }
+            return null;
+        }
+
+        private bool TrySpawnOneDrone(ActionResult ar)
+        {
+            try
+            {
+                System.Type gadget = FindGameType("Gadget");
+                System.Type idType = gadget != null ? gadget.GetNestedType("Id", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic) : null;
+                if (idType == null) { ar.note = "找不到 Gadget.Id，无法放无人机"; return false; }
+                object droneId = Enum.Parse(idType, "DRONE");
+                System.Type ctxType = FindGameType("GameContext");
+                if (ctxType == null) { ar.note = "找不到 GameContext"; return false; }
+                object ctx = null;
+                var inst = ctxType.GetProperty("Instance", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+                if (inst != null) ctx = inst.GetValue(null, null);
+                if (ctx == null)
+                {
+                    var found = UnityEngine.Object.FindObjectsOfType(ctxType);
+                    if (found != null && found.Length > 0) ctx = found[0];
+                }
+                if (ctx == null) { ar.note = "找不到 GameContext"; return false; }
+                var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;
+                object lookup = null;
+                var lp = ctx.GetType().GetProperty("LookupDirector", flags);
+                if (lp != null) lookup = lp.GetValue(ctx, null);
+                if (lookup == null)
+                {
+                    var lf = ctx.GetType().GetField("LookupDirector", flags);
+                    if (lf != null) lookup = lf.GetValue(ctx);
+                }
+                if (lookup == null) { ar.note = "找不到 LookupDirector"; return false; }
+                System.Reflection.MethodInfo getDef = null;
+                foreach (var m in lookup.GetType().GetMethods(flags))
+                {
+                    if (m.Name == "GetGadgetDefinition" && m.GetParameters().Length == 1) { getDef = m; break; }
+                }
+                if (getDef == null) { ar.note = "找不到 GetGadgetDefinition"; return false; }
+                object def = getDef.Invoke(lookup, new object[] { droneId });
+                if (def == null) { ar.note = "拿不到无人机定义，可能还没解锁 7Zee"; return false; }
+                object prefabObj = null;
+                var pf = def.GetType().GetField("prefab", flags);
+                if (pf != null) prefabObj = pf.GetValue(def);
+                if (prefabObj == null)
+                {
+                    var pp = def.GetType().GetProperty("prefab", flags);
+                    if (pp != null) prefabObj = pp.GetValue(def, null);
+                }
+                GameObject prefab = prefabObj as GameObject;
+                if (prefab == null) { ar.note = "无人机定义里没有 prefab"; return false; }
+                Vector3 pos = _player.transform.position + _player.transform.forward * 4f;
+                pos.y = _player.transform.position.y;
+                bool made = RunOnMain(() =>
+                {
+                    UnityEngine.Object.Instantiate(prefab, pos, Quaternion.identity);
+                    return true;
+                });
+                if (!made) { ar.note = "放下无人机失败"; return false; }
+                return true;
+            }
+            catch (Exception e)
+            {
+                ar.note = "放下无人机失败: " + e.GetBaseException().Message;
+                return false;
+            }
         }
 
         // ---- 类型内省（诊断：无人机/小工具 API 侦察）----

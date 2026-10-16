@@ -1,16 +1,12 @@
 #!/usr/bin/env python3
-"""端到端验证：真实走到结晶市场并投出背包结晶卖钱。
-
-验证链路 = mod 感知(scan_market 站位/投入口) -> 真实键鼠(转向/走路/蓄力投掷)
-         -> 卖前/卖后 mod 真实资金对比。
-"""
+"""端到端验证：真实走到结晶市场并投出背包结晶卖钱。"""
 from __future__ import annotations
 import os
 import sys
 import time
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 
 from core.bridge import BridgeIOController  # noqa: E402
 from core.real import WalkCaptureIO  # noqa: E402

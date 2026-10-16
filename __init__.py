@@ -141,6 +141,7 @@ class SlimeRanchAutopilotPlugin(NekoPluginBase):
         except Exception:
             pass
         self._sync_config_to_disk()
+        self._archive_outbox()
         self._poll_task = asyncio.create_task(self._poll_outbox_loop())
         # 插件被激活/随总开关启动时，不再自动拉起自动化核心：
         # 核心只在用户在面板点「启动自动游玩」(start_autopilot) 时才 spawn，
@@ -232,6 +233,22 @@ class SlimeRanchAutopilotPlugin(NekoPluginBase):
         try:
             if os.path.exists(path):
                 os.remove(path)
+        except Exception:
+            pass
+
+    def _archive_outbox(self) -> None:
+        """启动时把上一轮的 outbox 挪走，避免历史消息被重新念一遍。"""
+        self._seen_msg = 0
+        if not self._runtime_dir:
+            return
+        path = os.path.join(self._runtime_dir, "outbox.jsonl")
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            return
+        dest = os.path.join(self._runtime_dir, "outbox.prev.jsonl")
+        try:
+            if os.path.exists(dest):
+                os.remove(dest)
+            os.replace(path, dest)
         except Exception:
             pass
 
